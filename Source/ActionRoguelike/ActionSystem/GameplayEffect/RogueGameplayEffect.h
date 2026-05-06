@@ -76,9 +76,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
 	TArray<FGameplayTag> EffectsToCure;
 	
-	
-	// TODO:: editor check:
-	// - only instant and periodic apply can work here
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 };
 
 
@@ -91,6 +89,8 @@ public:
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
 	TArray<FAttributeDebuffData> Debuffs;
+	
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 	
 #if WITH_EDITOR
 	virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& PropertyChangedEvent) override;

@@ -25,8 +25,8 @@ void URogueGameplayEffectInstance::RemoveGameplayEffectDebuffs(const TArray<FAtt
 
 // Attribute Effect Instance
 
-void URogueAttributeEffectInstance::Init(URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-	UObject* InSender, uint8 InStackIndex)
+void URogueAttributeEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+	const UObject* InSender, uint8 InStackIndex)
 {
 	Super::Init(InTemplate, InOwnerActionSystemComponent, InSender, InStackIndex);
 	
@@ -85,8 +85,8 @@ void URogueAttributeEffectInstance::OnPeriodicApplyExpired()
 
 // Debuff Effect Instance
 
-void URogueDebuffEffectInstance::Init(URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-	UObject* InSender, uint8 InStackIndex)
+void URogueDebuffEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+	const UObject* InSender, uint8 InStackIndex)
 {
 	Super::Init(InTemplate, InOwnerActionSystemComponent, InSender, InStackIndex);
 	

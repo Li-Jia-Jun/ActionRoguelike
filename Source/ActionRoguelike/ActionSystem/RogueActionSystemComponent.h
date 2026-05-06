@@ -15,9 +15,17 @@ class URogueGameplayEffectInstance;
 class UAbilitySystemComponent;
 
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FAttributeSetChangedSignature, FRogueAttributeSetSnapshot, OldSnapshot, FRogueAttributeSetSnapshot, NewSnapshot);
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FGameplayEffectChangedSignature, const TArray<FGameplayTag>&, OldTags, const TArray<FGameplayTag>&, NewTags);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FAttributeSetChangedSignature, FRogueAttributeSetSnapshot, OldSnapshot, FRogueAttributeSetSnapshot, NewSnapshot
+	);
 
+DECLARE_MULTICAST_DELEGATE_TwoParams(
+	FAttributeSetChangedSignatureCPP, FRogueAttributeSetSnapshot, FRogueAttributeSetSnapshot
+	);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FGameplayEffectChangedSignature, const TArray<FGameplayTag>&, OldTags, const TArray<FGameplayTag>&, NewTags
+	);
 
 
 
@@ -31,26 +39,40 @@ public:
 	
 	virtual void BeginPlay() override;
 	
+	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
+	
 	void GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls);
 	
 	bool TryActivateAbilityByTag(FGameplayTag AbilityTag);
 	
 	void EndAbility(URogueGameplayAbility* Ability);
 	
-	bool CanApplyGameplayEffect(URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
+	bool CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
 	
-	bool ApplyGameplayEffectToSelf(URogueGameplayEffect* GameplayEffect, UObject* Sender);
+	bool ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, 
+		const UObject* Sender, URogueGameplayEffectInstance*& OutInstance);
+	
+	template <typename UserClass>
+	void RegisterAttributeSetChangedCallback(UserClass *Object, 
+		typename TMemFunPtrType<false, UserClass, void(FRogueAttributeSetSnapshot, FRogueAttributeSetSnapshot)>::Type InFunc)
+	{
+		AttributeSetChangedDelegateCPP.AddUObject(Object, InFunc);
+	}
+	
+	void RemoveAttributeSetChangedCallback(UObject *Object);
+	
+	FRogueAttributeSetSnapshot TakeAttributeSnapshot() const;
 	
 	UFUNCTION(BlueprintCallable)
 	TArray<FGameplayTag> GetActiveGameplayEffectTags() const;
 
 protected:
 	
-	bool GameplayEffectCanApplyTagCheck(URogueGameplayEffect* GameplayEffect, FString& FailMessage) const;
+	bool GameplayEffectCanApplyTagCheck(const URogueGameplayEffect* GameplayEffect, FString& FailMessage) const;
 	
-	bool GameplayEffectCanApplyStackCheck(URogueGameplayEffect* GameplayEffect, FString& FailMessage) const;
+	bool GameplayEffectCanApplyStackCheck(const URogueGameplayEffect* GameplayEffect, FString& FailMessage) const;
 	
-	int GetGameplayEffectStackCount(URogueGameplayEffect* GameplayEffect) const;
+	int GetGameplayEffectStackCount(const URogueGameplayEffect* GameplayEffect) const;
 	
 	void ApplyGameplayEffectModifiers(const TArray<FRogueGameplayEffectModifier>& Modifiers);
 	
@@ -90,6 +112,8 @@ protected:
 	
 	// Attribute Set
 	
+	void BroadcastAttributeSetChanged(const FRogueAttributeSetSnapshot& OldSnapshot, const FRogueAttributeSetSnapshot& NewSnapshot) const;
+	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AttributeSet")
 	TObjectPtr<URogueAttributeSet> AttributeSet;
 	
@@ -98,4 +122,6 @@ protected:
 	
 	UPROPERTY(BlueprintAssignable, Category="AttributeSet")
 	FAttributeSetChangedSignature AttributeSetChangedDelegate;
+	
+	FAttributeSetChangedSignatureCPP AttributeSetChangedDelegateCPP;
 };

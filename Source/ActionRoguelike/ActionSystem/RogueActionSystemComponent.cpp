@@ -29,6 +29,18 @@ void URogueActionSystemComponent::BeginPlay()
 	AttributeSet->InitByTemplate(AttributeSetTemplate);
 }
 
+void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
+{
+	// Manual effect instances finish
+	for (auto Instance : GameplayEffectInstances)
+	{
+		Instance->Finish();
+	}
+	GameplayEffectInstances.Empty();
+	
+	Super::OnComponentDestroyed(bDestroyingHierarchy);
+}
+
 bool URogueActionSystemComponent::FindGrantedAbility(FGameplayTag AbilityTag, FRogueGameplayAbilitySpec& OutAbility)
 {
 	for (auto& Ability : GrantedAbilities)
@@ -127,7 +139,7 @@ void URogueActionSystemComponent::EndAbility(URogueGameplayAbility* Ability)
 	}
 }
 
-bool URogueActionSystemComponent::CanApplyGameplayEffect(URogueGameplayEffect* GameplayEffect, const UObject* Sender) const
+bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const
 {
 	FString FailMessage = FString::Printf(TEXT("%s Cannot cannot apply %s from %s: "), 
 			*GetOwner()->GetName(), *Sender->GetName(), *GameplayEffect->GetName());
@@ -148,7 +160,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(URogueGameplayEffect* G
 	}
 	
 	// Value check if it is an Attribute Effect
-	if (URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
+	if (const URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
 	{
 		if (AttributeEffect->Modifiers.Num() > 0 and !AttributeSet->CanAffordModifiers(AttributeEffect->Modifiers, FailMessage))
 		{
@@ -160,7 +172,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(URogueGameplayEffect* G
 	}
 	
 	// Debuff check
-	if (URogueDebuffGameplayEffect* DebuffEffect = Cast<URogueDebuffGameplayEffect>(GameplayEffect))
+	if (const URogueDebuffGameplayEffect* DebuffEffect = Cast<URogueDebuffGameplayEffect>(GameplayEffect))
 	{
 		// TODO check what?
 	}
@@ -168,7 +180,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(URogueGameplayEffect* G
 	return true;
 }
 
-bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(URogueGameplayEffect* GameplayEffect, UObject* Sender)
+bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, const UObject* Sender, URogueGameplayEffectInstance*& OutInstance)
 {
 	if (!CanApplyGameplayEffect(GameplayEffect, this))
 	{
@@ -178,7 +190,7 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(URogueGameplayEffect
 	// Early exit for instant apply
 	if (GameplayEffect->DurationPolicy.GetScriptStruct() == FRogueGameplayEffectInstantApply::StaticStruct())
 	{
-		if (URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
+		if (const URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
 		{
 			ApplyGameplayEffectModifiers(AttributeEffect->Modifiers);
 			return true;
@@ -191,11 +203,11 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(URogueGameplayEffect
 	
 	// Create instances for all non-instant effects
 	URogueGameplayEffectInstance* EffectInstance = nullptr;
-	if (URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
+	if (const URogueAttributeGameplayEffect* AttributeEffect = Cast<URogueAttributeGameplayEffect>(GameplayEffect))
 	{
 		EffectInstance = NewObject<URogueAttributeEffectInstance>(GetOwner());
 	}
-	else if (URogueDebuffGameplayEffect* DebuffEffect = Cast<URogueDebuffGameplayEffect>(GameplayEffect))
+	else if (const URogueDebuffGameplayEffect* DebuffEffect = Cast<URogueDebuffGameplayEffect>(GameplayEffect))
 	{
 		EffectInstance = NewObject<URogueDebuffEffectInstance>(GetOwner());
 	}
@@ -229,6 +241,8 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(URogueGameplayEffect
 	
 	EffectInstance->Start();
 	
+	OutInstance = EffectInstance;
+	
 	return true;
 }
 
@@ -239,7 +253,7 @@ void URogueActionSystemComponent::ApplyGameplayEffectModifiers(const TArray<FRog
 	AttributeSet->ApplyModifiers(Modifiers);
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
-	AttributeSetChangedDelegate.Broadcast(OldSnapshot, NewSnapshot);
+	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
 }
 	
 void URogueActionSystemComponent::ApplyGameplayEffectDebuffs(const TArray<FAttributeDebuffData>& Debuffs)
@@ -249,7 +263,7 @@ void URogueActionSystemComponent::ApplyGameplayEffectDebuffs(const TArray<FAttri
 	AttributeSet->ApplyDebuffs(Debuffs);
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
-	AttributeSetChangedDelegate.Broadcast(OldSnapshot, NewSnapshot);
+	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
 }
 
 void URogueActionSystemComponent::RemoveGameplayEffectDebuffs(const TArray<FAttributeDebuffData>& Debuffs)
@@ -259,7 +273,7 @@ void URogueActionSystemComponent::RemoveGameplayEffectDebuffs(const TArray<FAttr
 	AttributeSet->RemoveDebuffs(Debuffs);
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
-	AttributeSetChangedDelegate.Broadcast(OldSnapshot, NewSnapshot);
+	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
 }
 
 TArray<FGameplayTag> URogueActionSystemComponent::GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& InGameplayEffectInstances)
@@ -304,7 +318,7 @@ void URogueActionSystemComponent::OnActiveGameplayEffectFinished(URogueGameplayE
 	RemoveActiveGameplayEffect(GameplayEffectInstance);
 }
 
-bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(URogueGameplayEffect* GameplayEffect, FString& FailMessage) const
+bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(const URogueGameplayEffect* GameplayEffect, FString& FailMessage) const
 {
 	if (GameplayEffect == nullptr)
 	{
@@ -315,7 +329,7 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(URogueGameplayE
 	// Pre-condition checks
 	if (GameplayEffect->PreconditionEffects.Num() > 0)
 	{
-		for (FGameplayTag& PreconditionTag : GameplayEffect->PreconditionEffects)
+		for (const FGameplayTag& PreconditionTag : GameplayEffect->PreconditionEffects)
 		{
 			bool bHasPrecondition = false;
 			for (FAttributeDebuffData& Debuff : AttributeSet->Debuffs)
@@ -338,7 +352,7 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(URogueGameplayE
 	// Immunity checks
 	if (GameplayEffect->ImmunityEffects.Num() > 0)
 	{
-		for (FGameplayTag& ImmunityTag : GameplayEffect->ImmunityEffects)
+		for (const FGameplayTag& ImmunityTag : GameplayEffect->ImmunityEffects)
 		{
 			for (FAttributeDebuffData& Debuff : AttributeSet->Debuffs)
 			{
@@ -354,7 +368,7 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(URogueGameplayE
 	return true;
 }
 
-bool URogueActionSystemComponent::GameplayEffectCanApplyStackCheck(URogueGameplayEffect* GameplayEffect, FString& FailMessage) const
+bool URogueActionSystemComponent::GameplayEffectCanApplyStackCheck(const URogueGameplayEffect* GameplayEffect, FString& FailMessage) const
 {
 	int count = GetGameplayEffectStackCount(GameplayEffect);
 	if (count >= GameplayEffect->StackLimit)
@@ -367,7 +381,7 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyStackCheck(URogueGamepla
 	return true;
 }
 
-int URogueActionSystemComponent::GetGameplayEffectStackCount(URogueGameplayEffect* GameplayEffect) const
+int URogueActionSystemComponent::GetGameplayEffectStackCount(const URogueGameplayEffect* GameplayEffect) const
 {
 	int count = 0;
 	for (URogueGameplayEffectInstance* GameplayEffectInstance : GameplayEffectInstances)
@@ -390,3 +404,18 @@ TArray<FGameplayTag> URogueActionSystemComponent::GetActiveGameplayEffectTags() 
 	return Tags;
 }
 
+void URogueActionSystemComponent::BroadcastAttributeSetChanged(const FRogueAttributeSetSnapshot& OldSnapshot, const FRogueAttributeSetSnapshot& NewSnapshot) const
+{
+	AttributeSetChangedDelegateCPP.Broadcast(OldSnapshot, NewSnapshot);
+	AttributeSetChangedDelegate.Broadcast(OldSnapshot, NewSnapshot);
+}
+
+void URogueActionSystemComponent::RemoveAttributeSetChangedCallback(UObject *Object)
+{
+	AttributeSetChangedDelegateCPP.RemoveAll(Object);
+}
+
+FRogueAttributeSetSnapshot URogueActionSystemComponent::TakeAttributeSnapshot() const
+{
+	return AttributeSet->TakeSnapshot();
+}

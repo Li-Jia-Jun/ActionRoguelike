@@ -28,8 +28,8 @@ class ACTIONROGUELIKE_API URogueGameplayEffectInstance : public UObject
 	GENERATED_BODY()
 		
 public:
-	virtual void Init(URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-		UObject* InSender, uint8 InStackIndex = 0)
+	virtual void Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+		const UObject* InSender, uint8 InStackIndex = 0)
 	{
 		Template = InTemplate;
 		OwnerActionSystemComponent = InOwnerActionSystemComponent;
@@ -52,7 +52,11 @@ protected:
 	
 	virtual void Finish()
 	{
-		GetWorld()->GetTimerManager().ClearTimer(TimerHandle);
+		if (TimerHandle.IsValid())
+		{
+			FTimerManager& TimerManager = GetWorld()->GetTimerManager();
+			TimerManager.ClearTimer(TimerHandle);
+		}
 		OnFisnihedDelegate.Broadcast(this);
 	};
 	
@@ -63,13 +67,13 @@ protected:
 	void RemoveGameplayEffectDebuffs(const TArray<FAttributeDebuffData>& Debuffs);
 	
 	UPROPERTY(VisibleAnywhere)
-	TObjectPtr<URogueGameplayEffect> Template;
+	TObjectPtr<const URogueGameplayEffect> Template;
 	
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<URogueActionSystemComponent> OwnerActionSystemComponent;
 	
 	UPROPERTY(VisibleAnywhere)
-	UObject* Sender;
+	const UObject* Sender;
 	
 	FTimerHandle TimerHandle;
 	
@@ -84,8 +88,8 @@ class URogueAttributeEffectInstance : public URogueGameplayEffectInstance
 	GENERATED_BODY()
 	
 public:
-	virtual void Init(URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-		UObject* InSender, uint8 InStackIndex) override;
+	virtual void Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+		const UObject* InSender, uint8 InStackIndex) override;
 
 	virtual void Start() override;
 	
@@ -94,7 +98,7 @@ protected:
 	virtual void Apply() override;
 	
 	UPROPERTY()
-	TObjectPtr<URogueAttributeGameplayEffect> AttributeEffect;
+	TObjectPtr<const URogueAttributeGameplayEffect> AttributeEffect;
 	
 	float PeriodicApplyCountdown;
 	void SetupPeriodicApplyTimer(const FRogueGameplayEffectPeriodicApply& PeriodicApply);
@@ -108,8 +112,8 @@ class URogueDebuffEffectInstance : public URogueGameplayEffectInstance
 	GENERATED_BODY()
 	
 public:
-	virtual void Init(URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-		UObject* InSender, uint8 InStackIndex) override;
+	virtual void Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+		const UObject* InSender, uint8 InStackIndex) override;
 	
 	virtual void Start() override;
 	
@@ -120,7 +124,7 @@ protected:
 	virtual void Finish() override;
 	
 	UPROPERTY()
-	URogueDebuffGameplayEffect* DebuffEffect;
+	const URogueDebuffGameplayEffect* DebuffEffect;
 	
 	UPROPERTY()
 	TArray<FAttributeDebuffData> InstancedDebuffs; // Cache from Effect and owns stack index
