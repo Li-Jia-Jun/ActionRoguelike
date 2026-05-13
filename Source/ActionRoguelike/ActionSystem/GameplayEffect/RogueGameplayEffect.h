@@ -95,7 +95,4 @@ public:
 #if WITH_EDITOR
 	virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& PropertyChangedEvent) override;
 #endif
-	
-	// TODO:: editor check:
-	// - only duration and infinite time apply can work here
 };

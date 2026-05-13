@@ -27,6 +27,5 @@ void URogueAttributeBarWidgetComponent::BeginPlay()
 	}
 	
 	AttributeBarWidget->InitializeWithASC(ASC, CurrentAttributeTag, MaxAttributeTag);
-	// AttributeBarWidget->AddToViewport();
 }
 
