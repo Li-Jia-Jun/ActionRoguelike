@@ -17,8 +17,6 @@ void ARogueAIController::BeginPlay()
 	
 	RunBehaviorTree(BehaviorTree);
 	
-	RunBehaviorTree(BehaviorTree);
-
 	FName TargetActor = FName("TargetActor");
 
 	// Temp

@@ -6,9 +6,7 @@
 #include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 #include "Engine/DataAsset.h"
-#include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 #include "RogueGameplayEffectModifier.h"
-#include "RogueGameplayEffectCalculation.h"
 #include "StructUtils/InstancedStruct.h"
 #include "RogueGameplayEffect.generated.h"
 
@@ -25,7 +23,7 @@ enum class ERogueGameplayEffectStackPolicy : uint8
 };
 
 
-UCLASS(BlueprintType, Abstract)
+UCLASS(BlueprintType)
 class URogueGameplayEffect: public UDataAsset
 {
 	GENERATED_BODY()
@@ -34,6 +32,10 @@ public:
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
 	FGameplayTag EffectTag;
+
+	UPROPERTY(EditDefaultsOnly, meta=(Category = "Rogue Gameplay Effect",
+		BaseStruct="/Script/ActionRoguelike.RougeGameplayEffectModifyPolicy"))
+	FInstancedStruct ModifyPolicy;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect",
 		meta = (BaseStruct = "/Script/ActionRoguelike.RogueGameplayEffectDurationPolicy"))
@@ -52,47 +54,4 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect",
 		meta = (ToolTips = "Can only apply this effect when target objects have all the effects from this list"))
 	TArray<FGameplayTag> PreconditionEffects;
-	
-protected:
-	
-	friend class URogueGameplayEffectInstance;
-	friend class URogueActionSystemComponent;
-};
-
-
-UCLASS(BlueprintType)
-class URogueAttributeGameplayEffect: public URogueGameplayEffect
-{
-	GENERATED_BODY()
-	
-public:
-	
-	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
-	TArray<FRogueGameplayEffectModifier> Modifiers;
-	
-	UPROPERTY(EditDefaultsOnly, Instanced, Category = "Rogue Gameplay Effect")
-	TArray<TObjectPtr<URogueGameplayEffectCalculation>> Calculations;
-	
-	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
-	TArray<FGameplayTag> EffectsToCure;
-	
-	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
-};
-
-
-UCLASS(BlueprintType)
-class URogueDebuffGameplayEffect: public URogueGameplayEffect
-{
-	GENERATED_BODY()
-	
-public:
-	
-	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
-	TArray<FAttributeDebuffData> Debuffs;
-	
-	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
-	
-#if WITH_EDITOR
-	virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& PropertyChangedEvent) override;
-#endif
 };

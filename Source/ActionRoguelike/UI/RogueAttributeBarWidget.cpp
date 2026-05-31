@@ -32,7 +32,7 @@ void URogueAttributeBarWidget::InitializeWithASC(URogueActionSystemComponent* In
 
 	if (bHasCurrentAttribute && bHasMaxAttribute)
 	{
-		ASC->RegisterAttributeSetChangedCallback<URogueAttributeBarWidget>(this, &URogueAttributeBarWidget::OnAttributeSetChanged);
+		ASC->AttributeSetChangedDelegateCPP.AddUObject(this, &URogueAttributeBarWidget::OnAttributeSetChanged);
 		OnAttributeSetChanged(AttributeSetSnapshot, AttributeSetSnapshot);
 	}
 	else

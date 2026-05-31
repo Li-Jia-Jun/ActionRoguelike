@@ -4,8 +4,6 @@
 #include "RogueAttributeSet.h"
 #include "RogueAttributeRelationship.h"
 #include "ActionSystem/GameplayEffect/RogueGameplayEffectModifier.h"
-#include "DSP/AudioDebuggingUtilities.h"
-#include "Splines/SplineMath.h"
 
 
 void URogueAttributeSet::InitByTemplate(URogueAttributeSetTemplate* InTemplate)

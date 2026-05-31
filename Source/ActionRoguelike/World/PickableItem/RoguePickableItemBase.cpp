@@ -62,6 +62,7 @@ bool ARoguePickableItemBase::ApplyEffects(URogueActionSystemComponent* ActionSys
 	for (auto Effect : Effects)
 	{
 		// Any successful effect being received will mark the object consumed.
+		// Effect instances will be GC when this function is out of scope.
 		URogueGameplayEffectInstance* EffectInstance = nullptr;
 		bReceive |= ActionSystemComponent->ApplyGameplayEffectToSelf(Effect, this, EffectInstance);
 	}

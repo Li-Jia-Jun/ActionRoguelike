@@ -4,20 +4,35 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "GameplayTagContainer.h"
 #include "ERogueGameplayAbilityInstancePolicy.h"
+#include "ActionSystem/GameplayEvent/FRogueGameplayEventData.h"
+#include "FRogueGameplayAbilityEndedData.h"
 #include "RogueGameplayAbility.generated.h"
 
+class URogueGameplayAbility;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FAbilityEndedSignature, URogueGameplayAbility*, Ability, const FRogueGameplayAbilityEndedData&, EndedData
+);
+
+class UAnimMontage;
 class URogueGameplayEffect;
 class URogueActionSystemComponent;
+class URogueGameplayEffectInstance;
 
-
-UCLASS()
+UCLASS(Blueprintable, Abstract)
 class ACTIONROGUELIKE_API URogueGameplayAbility : public UObject
 {
 	GENERATED_BODY()
 	
 public:
+	
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
+	TObjectPtr<URogueActionSystemComponent> OwnerActionSystemComponent;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
 	FGameplayTag AbilityTag;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
@@ -28,9 +43,12 @@ public:
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
 	ERogueGameplayAbilityInstancePolicy InstancePolicy;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
-	TObjectPtr<URogueActionSystemComponent> OwnerActionSystemComponent;
+	
+	UPROPERTY(BlueprintCallable, Category = "Rogue Gameplay Ability")
+	FAbilityEndedSignature AbilityEndedDelegate;
+	
+	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
+	virtual bool CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const;
 	
 	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
 	virtual bool CanActivateAbility() const;
@@ -44,8 +62,43 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
 	virtual void EndAbility();
 	
-	// TODO editor check: 
-	//	- cost effect must be attribute effect, must be instant
-	//  - cooldown effect must be a duration debuff effect, must be constant 
+	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
+	float CooldownTimeRemaining() const;
 	
+	bool operator==(const URogueGameplayAbility& Other) const
+	{
+		return AbilityTag.MatchesTag(Other.AbilityTag);
+	}
+
+protected:
+	
+	virtual FRogueGameplayAbilityEndedData ComposeEndedData() const;
+	
+	// Status
+	
+	UPROPERTY(VisibleAnywhere, Category = "Rogue Gameplay Ability")
+	bool bIsActivated;
+	
+	// Animation Montage
+	
+	void PlayAnimMontageAndTrackEvent(UAnimMontage* Montage, FGameplayTag EventTag);
+	
+	UFUNCTION()
+	virtual void OnAnimMontageFinished(UAnimMontage* Montage, bool bInterrupted)
+	PURE_VIRTUAL(URogueGameplayAbility::OnAnimMontageFinished, );
+	
+	UFUNCTION()
+	virtual void OnAnimMontageEventReceived(FGameplayTag EventTag, FRogueGameplayEventData EventData) 
+	PURE_VIRTUAL(URogueGameplayAbility::OnAnimMontageEventReceived, );
+	
+	TWeakObjectPtr<URogueGameplayEffectInstance> CooldownEffectInstance;
+	
+	TWeakObjectPtr<UAnimInstance> AnimInstanceToTrack;
+	FGameplayTag EventTagToTrack;
+	
+	friend class URogueActionSystemComponent;
+
+#if WITH_EDITOR
+	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
+#endif
 };

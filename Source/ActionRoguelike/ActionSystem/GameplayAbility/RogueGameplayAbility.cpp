@@ -2,16 +2,30 @@
 
 
 #include "RogueGameplayAbility.h"
+#include "GameFramework/Character.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
+#include "ActionSystem/GameplayEffect/RogueGameplayEffectDurationPolicy.h"
+#include "ActionSystem/GameplayEffect/URogueGameplayEffectInstance.h"
 
+
+bool URogueGameplayAbility::CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const
+{
+	return true;
+}
 
 bool URogueGameplayAbility::CanActivateAbility() const
 {
+	// Cost check 
 	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CostEffect, this))
 	{
 		return false;
 	}
 	
+	// Cooldown check
+	if (CooldownEffectInstance.IsValid())
+	{
+		return false;
+	}
 	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CooldownEffect, this))
 	{
 		return false;
@@ -22,7 +36,8 @@ bool URogueGameplayAbility::CanActivateAbility() const
 
 void URogueGameplayAbility::ActivateAbility()
 {
-	// Blueprint will impl 
+	// Status
+	bIsActivated = true;
 }
 
 bool URogueGameplayAbility::CommitAbility()
@@ -32,12 +47,93 @@ bool URogueGameplayAbility::CommitAbility()
 		return false;
 	}
 	
-	// Apply cost and cool down
+	// Apply cost effect (instant) so there will be no instance
+	URogueGameplayEffectInstance* OutCostEffectInstance = nullptr;
+	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CostEffect, this, OutCostEffectInstance);
+	
+	// Apply cooldown effect and save its pointer
+	URogueGameplayEffectInstance* OutCooldownEffectInstance = nullptr;
+	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CooldownEffect, this, OutCooldownEffectInstance);
+	CooldownEffectInstance = OutCooldownEffectInstance;
 	
 	return true;
 }
 
 void URogueGameplayAbility::EndAbility()
 {
-	// Blueprint will impl
+	// Status
+	bIsActivated = false;
+	
+	// Clean up delegate
+	OwnerActionSystemComponent->GameplayEventReceivedDelegate.RemoveAll(this);
+	
+	// Clean up anim
+	if (AnimInstanceToTrack.IsValid())
+	{
+		AnimInstanceToTrack->Montage_Stop(0.0f);
+		AnimInstanceToTrack->OnMontageEnded.RemoveAll(this);
+	}
+	
+	// Broadcast ending
+	AbilityEndedDelegate.Broadcast(this, ComposeEndedData());
+}
+
+FRogueGameplayAbilityEndedData URogueGameplayAbility::ComposeEndedData() const
+{
+	FRogueGameplayAbilityEndedData EndedData;
+	EndedData.bIsSuccessful = true;
+	EndedData.Object = nullptr;
+	EndedData.Value = 0.0f;
+	return EndedData;
+}
+
+float URogueGameplayAbility::CooldownTimeRemaining() const
+{
+	if (CooldownEffectInstance.IsValid())
+	{
+		return CooldownEffectInstance->GetTimeRemaining();
+	}
+
+	return 0.0f;
+}
+
+void URogueGameplayAbility::PlayAnimMontageAndTrackEvent(UAnimMontage* Montage, FGameplayTag EventTag)
+{
+	// Play animation, track its gameplay event and anim ended event
+	
+	if (ACharacter* Character = Cast<ACharacter>(OwnerActionSystemComponent->GetOwner()))
+	{
+		if (Character->PlayAnimMontage(Montage))
+		{
+			EventTagToTrack = EventTag;
+			AnimInstanceToTrack = Character->GetMesh()->GetAnimInstance();
+			AnimInstanceToTrack->OnMontageEnded.AddDynamic(this, &URogueGameplayAbility::OnAnimMontageFinished);
+			OwnerActionSystemComponent->GameplayEventReceivedDelegate.AddDynamic(this, &URogueGameplayAbility::OnAnimMontageEventReceived);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Unable to play anim montage. PlayAnimMontageAndTrackEvent() fails."));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("%s is not an ACharacter. PlayAnimMontageAndTrackEvent() fails."), *OwnerActionSystemComponent->GetOwner()->GetName());
+	}
+}
+
+EDataValidationResult URogueGameplayAbility::IsDataValid(FDataValidationContext& Context) const
+{
+	// Cost effect rules
+	if (CostEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectInstantApply::StaticStruct())
+	{
+		return EDataValidationResult::Invalid;
+	}
+	
+	// Cooldown effect rules
+	if (CooldownEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectDurationApply::StaticStruct())
+	{
+		return EDataValidationResult::Invalid;
+	}
+	
+	return EDataValidationResult::Valid;
 }

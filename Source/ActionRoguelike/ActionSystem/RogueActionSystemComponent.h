@@ -4,16 +4,18 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "AttributeSet/RogueAttributeSet.h"
-#include "GameplayAbility/FRogueGameplayAbilitySpec.h"
+#include "ActionSystem/AttributeSet/RogueAttributeSet.h"
+#include "ActionSystem/GameplayAbility/FRogueGameplayAbilitySpec.h"
+#include "ActionSystem/GameplayAbility/FRogueGameplayAbilityEndedData.h"
+#include "ActionSystem/GameplayEvent/FRogueGameplayEventData.h"
 #include "RogueActionSystemComponent.generated.h"
+
 
 class URogueAttributeModifierBase;
 class URogueGameplayAbility;
 class URogueGameplayEffect;
 class URogueGameplayEffectInstance;
 class UAbilitySystemComponent;
-
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 	FAttributeSetChangedSignature, FRogueAttributeSetSnapshot, OldSnapshot, FRogueAttributeSetSnapshot, NewSnapshot
@@ -27,6 +29,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 	FGameplayEffectChangedSignature, const TArray<FGameplayTag>&, OldTags, const TArray<FGameplayTag>&, NewTags
 	);
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FReceiveGameplayEventSignature, FGameplayTag, EventTag, FRogueGameplayEventData, Payload
+	);
 
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
@@ -41,23 +46,14 @@ public:
 	
 	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
 	
-	void GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls);
+	bool GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls, FRogueGameplayAbilitySpec& OutAbilitySpec);
 	
 	bool TryActivateAbilityByTag(FGameplayTag AbilityTag);
-	
-	void EndAbility(URogueGameplayAbility* Ability);
 	
 	bool CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
 	
 	bool ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, 
-		const UObject* Sender, URogueGameplayEffectInstance*& OutInstance);
-	
-	template <typename UserClass>
-	void RegisterAttributeSetChangedCallback(UserClass *Object, 
-		typename TMemFunPtrType<false, UserClass, void(FRogueAttributeSetSnapshot, FRogueAttributeSetSnapshot)>::Type InFunc)
-	{
-		AttributeSetChangedDelegateCPP.AddUObject(Object, InFunc);
-	}
+		const UObject* Sender, URogueGameplayEffectInstance* OutInstance);
 	
 	void RemoveAttributeSetChangedCallback(UObject *Object);
 	
@@ -66,6 +62,22 @@ public:
 	UFUNCTION(BlueprintCallable)
 	TArray<FGameplayTag> GetActiveGameplayEffectTags() const;
 
+	UFUNCTION(BlueprintCallable)
+	void HandleGameplayEvent(FGameplayTag EventTag, const FRogueGameplayEventData& Payload);
+	
+	// Delegates
+	
+	UPROPERTY(BlueprintAssignable, Category="GameplayEvent")
+	FReceiveGameplayEventSignature GameplayEventReceivedDelegate;
+	
+	UPROPERTY(BlueprintAssignable, Category="GameplayEffect")
+	FGameplayEffectChangedSignature GameplayEffectChangedDelegate;
+	
+	UPROPERTY(BlueprintAssignable, Category="AttributeSet")
+	FAttributeSetChangedSignature AttributeSetChangedDelegate;
+	
+	FAttributeSetChangedSignatureCPP AttributeSetChangedDelegateCPP;
+	
 protected:
 	
 	bool GameplayEffectCanApplyTagCheck(const URogueGameplayEffect* GameplayEffect, FString& FailMessage) const;
@@ -91,22 +103,26 @@ protected:
 	
 	// Gameplay Ability
 	
-	bool FindGrantedAbility(FGameplayTag AbilityTag, FRogueGameplayAbilitySpec& OutAbility);
-	bool ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec);
+	bool FindGrantedAbility(FGameplayTag AbilityTag, FRogueGameplayAbilitySpec& OutAbilitySpec);
+	
+	bool ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility* OutAbility);
+	
+	UFUNCTION()
+	void OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData);
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="GameplayAbility")
-	TArray<FRogueGameplayAbilitySpec> GrantedAbilities;
+	TArray<FRogueGameplayAbilitySpec> GrantedAbilitySpecs;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="GameplayAbility")
 	TArray<TObjectPtr<URogueGameplayAbility>> ActiveAbilities;
 	
 	// Gameplay Effect
 	
+	UPROPERTY(EditDefaultsOnly)
+	TArray<TObjectPtr<URogueGameplayEffect>> StartupGameplayEffects;
+	
 	UPROPERTY(VisibleAnywhere, Category="GameplayEffect")
 	TArray<TObjectPtr<URogueGameplayEffectInstance>> GameplayEffectInstances;
-	
-	UPROPERTY(BlueprintAssignable, Category="GameplayEffect")
-	FGameplayEffectChangedSignature GameplayEffectChangedDelegate;
 	
 	friend class URogueGameplayEffectInstance;
 	
@@ -119,9 +135,4 @@ protected:
 	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AttributeSet")
 	TObjectPtr<URogueAttributeSetTemplate> AttributeSetTemplate;
-	
-	UPROPERTY(BlueprintAssignable, Category="AttributeSet")
-	FAttributeSetChangedSignature AttributeSetChangedDelegate;
-	
-	FAttributeSetChangedSignatureCPP AttributeSetChangedDelegateCPP;
 };

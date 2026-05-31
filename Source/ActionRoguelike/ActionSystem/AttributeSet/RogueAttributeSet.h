@@ -50,7 +50,7 @@ struct FAttributeDebuffData
 {
 	GENERATED_BODY()
 	
-	FGameplayTag Tag; // Cache from GameplayEffect
+	FGameplayTag Tag; // Cache from GameplayEffect instance
 	
 	uint8 StackIndex; // Cache from GameplayEffect instance
 	

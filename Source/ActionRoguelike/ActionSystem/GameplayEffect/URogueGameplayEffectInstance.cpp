@@ -4,136 +4,83 @@
 #include "URogueGameplayEffectInstance.h"
 #include "RogueGameplayEffect.h"
 #include "RogueGameplayEffectDurationPolicy.h"
+#include "RogueGameplayEffectModifyPolicy.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 
-// Effect Instance
 
-void URogueGameplayEffectInstance::ApplyGameplayEffectModifiers(const TArray<FRogueGameplayEffectModifier>& Modifiers)
-{
-	OwnerActionSystemComponent->ApplyGameplayEffectModifiers(Modifiers);
-}
-	
-void URogueGameplayEffectInstance::ApplyGameplayEffectDebuffs(const TArray<FAttributeDebuffData>& Debuffs)
-{
-	OwnerActionSystemComponent->ApplyGameplayEffectDebuffs(Debuffs);
-}
-	
-void URogueGameplayEffectInstance::RemoveGameplayEffectDebuffs(const TArray<FAttributeDebuffData>& Debuffs)
-{
-	OwnerActionSystemComponent->RemoveGameplayEffectDebuffs(Debuffs);
-}
-
-// Attribute Effect Instance
-
-void URogueAttributeEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
+void URogueGameplayEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
 	const UObject* InSender, uint8 InStackIndex)
 {
-	Super::Init(InTemplate, InOwnerActionSystemComponent, InSender, InStackIndex);
-	
-	AttributeEffect = Cast<URogueAttributeGameplayEffect>(InTemplate);
+	Template = InTemplate;
+	OwnerActionSystemComponent = InOwnerActionSystemComponent;
+	Sender = InSender;
+	StackIndex = InStackIndex;
 }
 
-void URogueAttributeEffectInstance::Apply()
+float URogueGameplayEffectInstance::GetTimeRemaining() const
 {
-	ApplyGameplayEffectModifiers(AttributeEffect->Modifiers);
+	return DurationPolicyInstance->TimeRemaining();
 }
 
-void URogueAttributeEffectInstance::Start()
+void URogueGameplayEffectInstance::Start()
 {
-	if (AttributeEffect->DurationPolicy.GetScriptStruct() == FRogueGameplayEffectPeriodicApply::StaticStruct())
+	// Create duration policy instance
+	if (const FRogueGameplayEffectPeriodicApply* PeriodicApply = Template->DurationPolicy.GetPtr<FRogueGameplayEffectPeriodicApply>())
 	{
-		const FRogueGameplayEffectPeriodicApply& PeriodicApply = AttributeEffect->DurationPolicy.Get<FRogueGameplayEffectPeriodicApply>();
-		SetupPeriodicApplyTimer(PeriodicApply);
+		DurationPolicyInstance = NewObject<URogueGameplayEffectPeriodApplyInstance>(this);
 	}
-}
-
-void URogueAttributeEffectInstance::SetupPeriodicApplyTimer(const FRogueGameplayEffectPeriodicApply& PeriodicApply)
-{
-	if (PeriodicApply.ApplyFirstImmediately)
+	else if (const FRogueGameplayEffectDurationApply* DurationApply = Template->DurationPolicy.GetPtr<FRogueGameplayEffectDurationApply>())
 	{
-		// Total count being 1 means instant apply
-		if (PeriodicApply.TotalCount == 1)
-		{	
-			Apply();
-			OnFisnihedDelegate.Broadcast(this);
-		}
-		else
-		{
-			Apply();
-			PeriodicApplyCountdown = PeriodicApply.TotalCount - 1;
-			GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &URogueAttributeEffectInstance::OnPeriodicApplyExpired, PeriodicApply.Interval, true);
-		}
+		DurationPolicyInstance = NewObject<URogueGameplayEffectDurationApplyInstance>(this);
+	}
+	else if (const FRogueGameplayEffectInfiniteTimeApply* InfiniteApply = Template->DurationPolicy.GetPtr<FRogueGameplayEffectInfiniteTimeApply>())
+	{
+		DurationPolicyInstance = NewObject<URogueGameplayEffectInfiniteTimeApplyInstance>(this);
 	}
 	else
 	{
-		PeriodicApplyCountdown = PeriodicApply.TotalCount;
-		GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &URogueAttributeEffectInstance::OnPeriodicApplyExpired, PeriodicApply.Interval, true);
-	}
-}
-
-void URogueAttributeEffectInstance::OnPeriodicApplyExpired()
-{
-	Apply();
-	PeriodicApplyCountdown--;
-	
-	if (PeriodicApplyCountdown == 0)
-	{
+		// Instant apply: no timer needed, apply and finish immediately
+		Apply();
 		Finish();
+		return;
 	}
+
+	const FRogueGameplayEffectDurationPolicy* DurationPolicy = Template->DurationPolicy.GetPtr<FRogueGameplayEffectDurationPolicy>();
+	DurationPolicyInstance->Setup<URogueGameplayEffectInstance>(DurationPolicy, this, &ThisClass::Apply, &ThisClass::Finish);
+	DurationPolicyInstance->Start();
 }
 
-
-// Debuff Effect Instance
-
-void URogueDebuffEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-	const UObject* InSender, uint8 InStackIndex)
+void URogueGameplayEffectInstance::Apply()
 {
-	Super::Init(InTemplate, InOwnerActionSystemComponent, InSender, InStackIndex);
-	
-	DebuffEffect = Cast<URogueDebuffGameplayEffect>(InTemplate);
-	
-	// Create instanced debuff data
-	InstancedDebuffs = DebuffEffect->Debuffs;
-	for (FAttributeDebuffData& Debuff : InstancedDebuffs)
+	if (const FRogueGameplayEffectPermanentModify* PermanentModify = Template->ModifyPolicy.GetPtr<FRogueGameplayEffectPermanentModify>())
 	{
-		Debuff.Tag = DebuffEffect->EffectTag;
-		Debuff.StackIndex = StackIndex;
+		OwnerActionSystemComponent->ApplyGameplayEffectModifiers(PermanentModify->Modifiers);
 	}
-}
-
-void URogueDebuffEffectInstance::Start()
-{
-	// Debuff condition will always apply immediately (and remove when finish)
-	Apply();
-	
-	// Handle duration policy
-	if (DebuffEffect->DurationPolicy.GetScriptStruct() == FRogueGameplayEffectDurationApply::StaticStruct())
+	else if (const FRogueGameplayEffectDebuffModify* DebuffApplyData = Template->ModifyPolicy.GetPtr<FRogueGameplayEffectDebuffModify>())
 	{
-		const FRogueGameplayEffectDurationApply& DurationApply = DebuffEffect->DurationPolicy.Get<FRogueGameplayEffectDurationApply>();
-		SetupDurationApplyTimer(DurationApply);
+		// Assign effect tag and stack index to debuffs so that they can be identified for removal
+		TArray<FAttributeDebuffData> Debuffs = DebuffApplyData->Debuffs;
+		for (FAttributeDebuffData& Debuff : Debuffs)
+		{
+			Debuff.Tag = Template->EffectTag;
+			Debuff.StackIndex = StackIndex;
+		}
+		OwnerActionSystemComponent->ApplyGameplayEffectDebuffs(DebuffApplyData->Debuffs);
 	}
 }
 
-void URogueDebuffEffectInstance::Apply()
+void URogueGameplayEffectInstance::Finish()
 {
-	ApplyGameplayEffectDebuffs(InstancedDebuffs);
-}
-
-void URogueDebuffEffectInstance::Finish()
-{
-	RemoveGameplayEffectDebuffs(InstancedDebuffs);
-	Super::Finish();
-}
-
-void URogueDebuffEffectInstance::SetupDurationApplyTimer(const FRogueGameplayEffectDurationApply& DurationApply)
-{
-	GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &URogueDebuffEffectInstance::OnDurationApplyExpired, DurationApply.Duration, false);
-}
-
-void URogueDebuffEffectInstance::OnDurationApplyExpired()
-{
-	Finish();
-}
-
-
+	if (const FRogueGameplayEffectDebuffModify* DebuffApplyData = Template->ModifyPolicy.GetPtr<FRogueGameplayEffectDebuffModify>())
+	{
+		TArray<FAttributeDebuffData> Debuffs = DebuffApplyData->Debuffs;
+		for (FAttributeDebuffData& Debuff : Debuffs)
+		{
+			Debuff.Tag = Template->EffectTag;
+			Debuff.StackIndex = StackIndex;
+		}
+		OwnerActionSystemComponent->RemoveGameplayEffectDebuffs(Debuffs);
+	}
+	OnFinishedDelegate.Broadcast(this);
+};
 
