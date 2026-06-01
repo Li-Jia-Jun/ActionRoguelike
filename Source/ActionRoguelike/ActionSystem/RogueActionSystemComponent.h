@@ -53,7 +53,7 @@ public:
 	bool CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
 	
 	bool ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, 
-		const UObject* Sender, URogueGameplayEffectInstance* OutInstance);
+		const UObject* Sender, bool ForceApply, URogueGameplayEffectInstance*& OutInstance);
 	
 	void RemoveAttributeSetChangedCallback(UObject *Object);
 	
@@ -105,7 +105,7 @@ protected:
 	
 	bool FindGrantedAbility(FGameplayTag AbilityTag, FRogueGameplayAbilitySpec& OutAbilitySpec);
 	
-	bool ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility* OutAbility);
+	bool ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility*& OutAbility);
 	
 	UFUNCTION()
 	void OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData);

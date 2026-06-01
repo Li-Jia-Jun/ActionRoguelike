@@ -19,8 +19,7 @@ void URogueGameplayEffectDurationPolicyInstance::Finish()
 	OnFinishDelegateCPP.Broadcast();
 }
 
-
-// Periodic apply
+// Period apply
 
 void URogueGameplayEffectPeriodApplyInstance::Start()
 {
@@ -53,8 +52,14 @@ void URogueGameplayEffectPeriodApplyInstance::Start()
 void URogueGameplayEffectPeriodApplyInstance::OnTimerCallback()
 {	
 	Apply();
-	PeriodicCountdown--;
 	
+	// Forever apply
+	if (PeriodicCountdown == -1)
+	{
+		return;
+	}
+	
+	PeriodicCountdown--;
 	if (PeriodicCountdown == 0)
 	{
 		Finish();
@@ -66,6 +71,12 @@ float URogueGameplayEffectPeriodApplyInstance::TimeRemaining() const
 	if (!TimerHandle.IsValid())
 	{
 		return 0.0f;
+	}
+	
+	// Forever apply
+	if (PeriodicCountdown == -1)
+	{
+		return -1.0f;
 	}
 	
 	float CurrentCountdownRemaining = GetWorld()->GetTimerManager().GetTimerRemaining(TimerHandle);
@@ -82,17 +93,33 @@ void URogueGameplayEffectDurationApplyInstance::Start()
 	DurationApply = static_cast<const FRogueGameplayEffectDurationApply*>(DurationPolicy);
 	
 	Apply();
+	
+	// Forever apply
+	if (FMath::IsNearlyEqual(DurationApply->Duration, -1.0f))
+	{
+		return;
+	}
+	
 	GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &ThisClass::OnTimerCallback, DurationApply->Duration, false);
+}
+
+float URogueGameplayEffectDurationApplyInstance::TimeRemaining() const
+{
+	// Forever apply
+	if (FMath::IsNearlyEqual(DurationApply->Duration, -1.0f))
+	{
+		return -1.0f;
+	}
+	
+	if (TimerHandle.IsValid())
+	{
+		return GetWorld()->GetTimerManager().GetTimerRemaining(TimerHandle);
+	}
+	
+	return -1.0f;
 }
 
 void URogueGameplayEffectDurationApplyInstance::OnTimerCallback()
 {
 	Finish();
-}
-
-// Infinite Time apply
-
-void URogueGameplayEffectInfiniteTimeApplyInstance::Start()
-{
-	Apply();
 }

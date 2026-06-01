@@ -18,17 +18,21 @@ bool URogueGameplayAbility::CanActivateAbility() const
 	// Cost check 
 	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CostEffect, this))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to cost effect apply failure."), *GetName());
 		return false;
 	}
 	
 	// Cooldown check
 	if (CooldownEffectInstance.IsValid())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to existing cooldown effect instance. Time remaining = %f"), 
+			*GetName(), CooldownEffectInstance->GetTimeRemaining());
 		return false;
 	}
 	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CooldownEffect, this))
 	{
-		return false;
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to cooldown effect apply failure."), *GetName());
+			return false;
 	}
 	
 	return true;
@@ -49,11 +53,11 @@ bool URogueGameplayAbility::CommitAbility()
 	
 	// Apply cost effect (instant) so there will be no instance
 	URogueGameplayEffectInstance* OutCostEffectInstance = nullptr;
-	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CostEffect, this, OutCostEffectInstance);
+	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CostEffect, this, false, OutCostEffectInstance);
 	
 	// Apply cooldown effect and save its pointer
 	URogueGameplayEffectInstance* OutCooldownEffectInstance = nullptr;
-	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CooldownEffect, this, OutCooldownEffectInstance);
+	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CooldownEffect, this, false, OutCooldownEffectInstance);
 	CooldownEffectInstance = OutCooldownEffectInstance;
 	
 	return true;

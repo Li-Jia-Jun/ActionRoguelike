@@ -33,7 +33,7 @@ void ASMagicProjectile::OnActorHit(UPrimitiveComponent* HitComponent, AActor* Ot
 		for(auto gameplayEffect : GameplayEffects)
 		{
 			URogueGameplayEffectInstance* EffectInstance = nullptr;
-			ActionSystemComponent->ApplyGameplayEffectToSelf(gameplayEffect, this, EffectInstance);
+			ActionSystemComponent->ApplyGameplayEffectToSelf(gameplayEffect, this, false, EffectInstance);
 		}
 	}
 	

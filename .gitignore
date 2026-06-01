@@ -76,3 +76,6 @@ DerivedDataCache/*
 
 
 .idea/
+
+# VS plugin
+Plugins/VisualStudioTools

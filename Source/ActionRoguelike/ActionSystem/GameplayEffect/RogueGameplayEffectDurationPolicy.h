@@ -8,7 +8,7 @@
 
 // Data
 
-USTRUCT(BlueprintType, BlueprintInternalUseOnly)
+USTRUCT(BlueprintType, meta=(HiddenByDefault))
 struct FRogueGameplayEffectDurationPolicy
 {
 	GENERATED_BODY()
@@ -32,7 +32,7 @@ struct FRogueGameplayEffectPeriodicApply : public FRogueGameplayEffectDurationPo
 		ApplyFirstImmediately = false;
 	}
 	
-	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy", meta = (ToopTip = "How many times to apply in total"))
+	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy", meta = (ToopTip = "How many times to apply in total. -1 denotes forever."))
 	int TotalCount;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy", meta = (ToopTip = "Interval (in seconds) between each apply"))
@@ -40,6 +40,7 @@ struct FRogueGameplayEffectPeriodicApply : public FRogueGameplayEffectDurationPo
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy", meta = (ToopTip = "Whether to have the first apply immediately"))
 	bool ApplyFirstImmediately;
+	
 };
 
 USTRUCT(DisplayName = "Duration Apply")
@@ -52,14 +53,8 @@ struct FRogueGameplayEffectDurationApply : public FRogueGameplayEffectDurationPo
 		Duration = 0.0f;
 	}
 	
-	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy")
+	UPROPERTY(EditDefaultsOnly, Category = "Apply Policy", meta = (ToopTip = "How many seconds to last. -1 denotes forever."))
 	float Duration;
-};
-
-USTRUCT(DisplayName = "Infinite Time Apply")
-struct FRogueGameplayEffectInfiniteTimeApply : public FRogueGameplayEffectDurationPolicy
-{
-	GENERATED_BODY()
 };
 
 
@@ -68,7 +63,7 @@ struct FRogueGameplayEffectInfiniteTimeApply : public FRogueGameplayEffectDurati
 DECLARE_MULTICAST_DELEGATE(FOnGameplayEffectDurationPolicyOnApplySignatureCPP);
 DECLARE_MULTICAST_DELEGATE(FOnGameplayEffectDurationPolicyOnFinishSignatureCPP);
 
-UCLASS(Abstract)
+UCLASS(BlueprintType)
 class URogueGameplayEffectDurationPolicyInstance : public UObject
 {
 	GENERATED_BODY()
@@ -91,7 +86,8 @@ public:
 	
 	void Finish();
 	
-	virtual float TimeRemaining() const { return 0.0;};
+	UFUNCTION()
+	virtual float TimeRemaining() const {return 0.0f;}
 	
 protected:
 	
@@ -103,7 +99,7 @@ protected:
 	FTimerHandle TimerHandle;
 };
 
-UCLASS(Abstract)
+UCLASS(BlueprintType)
 class URogueGameplayEffectPeriodApplyInstance : public URogueGameplayEffectDurationPolicyInstance
 {
 	GENERATED_BODY()
@@ -122,7 +118,7 @@ protected:
 	int PeriodicCountdown;
 };
 
-UCLASS(Abstract)
+UCLASS(BlueprintType)
 class URogueGameplayEffectDurationApplyInstance : public URogueGameplayEffectDurationPolicyInstance
 {
 	GENERATED_BODY()
@@ -130,22 +126,12 @@ class URogueGameplayEffectDurationApplyInstance : public URogueGameplayEffectDur
 public:
 	
 	virtual void Start() override;
+	
+	virtual float TimeRemaining() const override;
 
 protected:
 	
 	virtual void OnTimerCallback();
 	
 	const FRogueGameplayEffectDurationApply* DurationApply;
-};
-
-UCLASS()
-class URogueGameplayEffectInfiniteTimeApplyInstance : public URogueGameplayEffectDurationPolicyInstance
-{
-	GENERATED_BODY()
-	
-public:
-	
-	virtual void Start() override;
-	
-	virtual float TimeRemaining() const override { return -1.0;};
 };

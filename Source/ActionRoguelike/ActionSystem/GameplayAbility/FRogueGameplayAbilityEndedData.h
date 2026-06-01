@@ -8,11 +8,11 @@ struct ACTIONROGUELIKE_API FRogueGameplayAbilityEndedData
 	GENERATED_BODY()
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	bool bIsSuccessful;
+	bool bIsSuccessful = false;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	UObject* Object;
+	UObject* Object = nullptr;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	float Value;
+	float Value = 0.0f;
 };

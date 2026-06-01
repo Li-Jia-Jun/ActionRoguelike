@@ -33,13 +33,9 @@ void URogueGameplayEffectInstance::Start()
 	{
 		DurationPolicyInstance = NewObject<URogueGameplayEffectDurationApplyInstance>(this);
 	}
-	else if (const FRogueGameplayEffectInfiniteTimeApply* InfiniteApply = Template->DurationPolicy.GetPtr<FRogueGameplayEffectInfiniteTimeApply>())
-	{
-		DurationPolicyInstance = NewObject<URogueGameplayEffectInfiniteTimeApplyInstance>(this);
-	}
 	else
 	{
-		// Instant apply: no timer needed, apply and finish immediately
+		// Fallback: no timer needed, apply and finish immediately
 		Apply();
 		Finish();
 		return;

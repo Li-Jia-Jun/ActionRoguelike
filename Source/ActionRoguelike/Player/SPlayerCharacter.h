@@ -38,7 +38,7 @@ public:
 	
 	// IAbilityAttackInfoProvider
 	
-	FTransform GetAimingTransform() const;
+	virtual FTransform GetAimingTransform_Implementation() const override;
 
 protected:
 	

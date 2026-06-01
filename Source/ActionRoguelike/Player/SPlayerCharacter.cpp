@@ -102,7 +102,7 @@ void ASPlayerCharacter::SpecialAttack(const FInputActionValue& InValue)
 
 // IAbilityAttackInfoProvider
 	
-FTransform ASPlayerCharacter::GetAimingTransform() const
+FTransform ASPlayerCharacter::GetAimingTransform_Implementation() const
 {
 	return CameraComp->GetComponentTransform();
 }

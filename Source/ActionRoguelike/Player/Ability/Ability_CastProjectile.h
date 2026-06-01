@@ -59,7 +59,21 @@ protected:
 	
 	virtual void OnAnimMontageEventReceived(FGameplayTag EventTag, FRogueGameplayEventData EventData) override;
 	
+	// Per-run state
+	
+	void ResetState()
+	{
+		OwnerCharacter = nullptr;
+		AnimInstance = nullptr;
+		bIsAnimInterrupted = false;
+		bIsCommitted = false;
+	}
+	
 	TWeakObjectPtr<ACharacter> OwnerCharacter;
 	
+	UAnimInstance* AnimInstance;
+	
 	bool bIsAnimInterrupted;
+	
+	bool bIsCommitted;
 };

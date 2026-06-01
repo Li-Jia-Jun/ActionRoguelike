@@ -30,14 +30,11 @@ void URogueActionSystemComponent::BeginPlay()
 	AttributeSet = NewObject<URogueAttributeSet>(this);
 	AttributeSet->InitByTemplate(AttributeSetTemplate);
 	
-	// Init Startup Gameplay Effects
+	// Init Startup Gameplay Effects (force apply)
 	for (auto Effect : StartupGameplayEffects)
 	{
-		if (CanApplyGameplayEffect(Effect, this))
-		{
-			URogueGameplayEffectInstance* TempInstance = nullptr;
-			ApplyGameplayEffectToSelf(Effect, this, TempInstance);
-		}
+		URogueGameplayEffectInstance* TempInstance = nullptr;
+		ApplyGameplayEffectToSelf(Effect, this, true, TempInstance);
 	}
 }
 
@@ -79,7 +76,8 @@ bool URogueActionSystemComponent::GrantGameplayAbility(TSubclassOf<URogueGamepla
 	if (not AbilityCDO->CheckCanBeGranted(this))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Ability %s cannot be granted for %s."), 
-			*AbilityCDO->AbilityTag.ToString(), *GetOwner()->GetName());;
+			*AbilityCDO->AbilityTag.ToString(), *GetOwner()->GetName());
+		return false;
 	}
 	
 	FRogueGameplayAbilitySpec FoundAbility;
@@ -118,21 +116,33 @@ bool URogueActionSystemComponent::TryActivateAbilityByTag(FGameplayTag AbilityTa
 			*AbilityTag.ToString(), *GetOwner()->GetName())
 		return false;
 	}
-	URogueGameplayAbility* Ability = nullptr;
-	bool bActivateResult = ActivateAbilityBySpec(FoundAbility, Ability);
-	if (bActivateResult)
+	
+	// If ability is already running, skip
+	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
 	{
-		// Register end ability callback
-		if (Ability)
+		if (ActiveAbility->AbilityTag.MatchesTag(AbilityTag))
 		{
-			Ability->AbilityEndedDelegate.AddDynamic(this, &URogueActionSystemComponent::OnAbilityEnded);
+			UE_LOG(LogTemp, Warning, TEXT("Ability %s is already running for %s"),
+				*AbilityTag.ToString(), *GetOwner()->GetName());
+			return false;
 		}
 	}
 	
-	return bActivateResult;
+	URogueGameplayAbility* Ability = nullptr;
+	if (ActivateAbilityBySpec(FoundAbility, Ability))
+	{
+		// Register end ability callback
+		if (Ability->InstancePolicy != ERogueGameplayAbilityInstancePolicy::eNotInstanced)
+		{
+			Ability->AbilityEndedDelegate.AddUniqueDynamic(this, &URogueActionSystemComponent::OnAbilityEnded);
+		}
+		return true;
+	}
+	
+	return false;
 }
 
-bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility* OutAbility)
+bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility*& OutAbility)
 {
 	// Not instanced
 	if (AbilitySpec.InstancePolicy == ERogueGameplayAbilityInstancePolicy::eNotInstanced)
@@ -141,26 +151,26 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 		if (AbilityCDO->CanActivateAbility())
 		{
 			AbilityCDO->ActivateAbility();
+			OutAbility = AbilityCDO;
 			// Not adding to the active ability list
 			return true;
 		}
 	}
 	
 	// Instanced
-	URogueGameplayAbility* Ability = nullptr;
 	if (AbilitySpec.InstancePolicy == ERogueGameplayAbilityInstancePolicy::eInstancePerActor)
 	{
-		Ability = AbilitySpec.SingleSpawnedInstance;
+		OutAbility = AbilitySpec.SingleSpawnedInstance;
 	}
 	else if (AbilitySpec.InstancePolicy == ERogueGameplayAbilityInstancePolicy::eInstancePerExecution)
 	{
-		Ability = DuplicateObject(AbilitySpec.SingleSpawnedInstance, GetOwner());
+		OutAbility = DuplicateObject(AbilitySpec.SingleSpawnedInstance, GetOwner());
 	}
 	
-	if (Ability and Ability->CanActivateAbility())
+	if (OutAbility and OutAbility->CanActivateAbility())
 	{
-		Ability->ActivateAbility();
-		ActiveAbilities.Add(Ability);
+		OutAbility->ActivateAbility();
+		ActiveAbilities.Add(OutAbility);
 		return true;
 	}
 	
@@ -169,9 +179,14 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 
 void URogueActionSystemComponent::OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData)
 {
-	if (ActiveAbilities.Contains(Ability))
+	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
 	{
-		ActiveAbilities.RemoveSingle(Ability);
+		if (ActiveAbility->AbilityTag.MatchesTag(Ability->AbilityTag))
+		{
+			ActiveAbilities.RemoveSingle(Ability);
+			Ability->AbilityEndedDelegate.RemoveAll(this);
+			break;
+		}
 	}
 }
 
@@ -195,7 +210,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 		return false;
 	}
 	
-	// Check for permanent apply
+	// Permanent modify value check
 	if (const FRogueGameplayEffectPermanentModify* PermanentModify = GameplayEffect->ModifyPolicy.GetPtr<FRogueGameplayEffectPermanentModify>())
 	{
 		if (PermanentModify->Modifiers.Num() > 0 and !AttributeSet->CanAffordModifiers(PermanentModify->Modifiers, FailMessage))
@@ -207,18 +222,13 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 		// TODO calculation check
 	}
 	
-	// Check for debuff apply
-	if (GameplayEffect->ModifyPolicy.GetScriptStruct() == FRogueGameplayEffectDebuffModify::StaticStruct())
-	{
-		// TODO check what?
-	}
-	
 	return true;
 }
 
-bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, const UObject* Sender, URogueGameplayEffectInstance* OutInstance)
+bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, const UObject* Sender, 
+	bool ForceApply, URogueGameplayEffectInstance*& OutInstance)
 {
-	if (!CanApplyGameplayEffect(GameplayEffect, this))
+	if (!ForceApply and !CanApplyGameplayEffect(GameplayEffect, this))
 	{
 		return false;
 	}
@@ -339,6 +349,9 @@ void URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffec
 		TArray<FGameplayTag> NewTags = OldTags;
 		NewTags.Remove(GameplayEffectInstance->Template->EffectTag);
 		GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
+		
+		// GC
+		GameplayEffectInstance->MarkAsGarbage();
 	}
 }
 

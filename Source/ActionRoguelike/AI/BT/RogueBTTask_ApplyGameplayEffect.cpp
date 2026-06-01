@@ -29,7 +29,7 @@ EBTNodeResult::Type URogueBTTask_ApplyGameplayEffect::ExecuteTask(UBehaviorTreeC
 	
 	// Apply effect
 	URogueGameplayEffectInstance* Instance = nullptr;
-	ThisASC->ApplyGameplayEffectToSelf(GameplayEffect, ThisCharacter, Instance);
+	ThisASC->ApplyGameplayEffectToSelf(GameplayEffect, ThisCharacter, false, Instance);
 	
 	if (GameplayEffect->DurationPolicy.GetScriptStruct() == FRogueGameplayEffectInstantApply::StaticStruct())
 	{

@@ -46,14 +46,17 @@ bool UAbility_CastProjectile::CheckCanBeGranted(URogueActionSystemComponent* Act
 	return Super::CheckCanBeGranted(ActionSystemComponent);
 }
 
-
 void UAbility_CastProjectile::ActivateAbility()
 {
+	// Reset last run
+	ResetState();
+	
 	// Cache info
 	OwnerCharacter = Cast<ACharacter>(OwnerActionSystemComponent->GetOwner());
 
-	// Play anim and register callback
+	// Play anim, register callback, cache anim instance
 	PlayAnimMontageAndTrackEvent(CastingAnimMontage, CastingAnimMontageWaitForEventTag);
+	AnimInstance = OwnerCharacter->GetMesh()->GetAnimInstance();
 	
 	// Play hand particle effect and attach to hand
 	UNiagaraFunctionLibrary::SpawnSystemAttached(CastingHandEffect, OwnerCharacter->GetMesh(), 
@@ -72,6 +75,7 @@ bool UAbility_CastProjectile::CommitAbility()
 	}
 	
 	CastProjectile();
+	bIsCommitted = true;
 	return true;
 }
 
@@ -82,7 +86,6 @@ void UAbility_CastProjectile::EndAbility()
 	// Stop anim if it is running
 	if (OwnerCharacter.IsValid())
 	{
-		UAnimInstance* AnimInstance = OwnerCharacter->GetMesh()->GetAnimInstance();
 		if (AnimInstance && AnimInstance->Montage_IsPlaying(CastingAnimMontage))
 		{
 			AnimInstance->Montage_Stop(0.0f, CastingAnimMontage);
@@ -90,8 +93,7 @@ void UAbility_CastProjectile::EndAbility()
 	}
 	
 	// Reset state
-	OwnerCharacter = nullptr;
-	bIsAnimInterrupted = false;
+	ResetState();
 }
 
 FRogueGameplayAbilityEndedData UAbility_CastProjectile::ComposeEndedData() const
@@ -163,12 +165,17 @@ void UAbility_CastProjectile::OnAnimMontageFinished(UAnimMontage* Montage, bool 
 	}
 	
 	// If not getting expected gameplay event, commit and end ability
-	CommitAbility();
+	if (!bIsCommitted)
+	{
+		CommitAbility();
+	}
 	EndAbility();
 }
 
 void UAbility_CastProjectile::OnAnimMontageEventReceived(FGameplayTag EventTag, FRogueGameplayEventData EventData)
 {
-	CommitAbility();
-	EndAbility();
+	if (EventTag.MatchesTag(CastingAnimMontageWaitForEventTag))
+	{
+		CommitAbility();
+	}
 }
