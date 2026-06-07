@@ -8,6 +8,7 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
+#include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 
 
 ASPlayerCharacter::ASPlayerCharacter()
@@ -41,6 +42,9 @@ void ASPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	InputComp->BindAction(Input_Look, ETriggerEvent::Triggered, this, &ASPlayerCharacter::Look);
 	InputComp->BindAction(Input_Jump, ETriggerEvent::Triggered, this, &ASPlayerCharacter::Jump);
 	
+	InputComp->BindAction(Input_Sprint, ETriggerEvent::Started, this, &ASPlayerCharacter::SprintStart);
+	InputComp->BindAction(Input_Sprint, ETriggerEvent::Completed, this, &ASPlayerCharacter::SprintStop);
+	
 	InputComp->BindAction(Input_PrimaryAttack, ETriggerEvent::Triggered, this, 
 		&ASPlayerCharacter::PrimaryAttack);
 	
@@ -59,6 +63,17 @@ void ASPlayerCharacter::BeginPlay()
 	ActionSystemComp->GrantGameplayAbility(PrimaryAttackAbilityCls, PrimaryAttackAbilitySpec);
 	ActionSystemComp->GrantGameplayAbility(SecondaryAttackAbilityCls, SecondaryAttackAbilitySpec);
 	ActionSystemComp->GrantGameplayAbility(SpecialAttackAbilityCls, SpecialAttackAbilitySpec);
+	ActionSystemComp->GrantGameplayAbility(SprintAbilityCls, SprintAbilitySpec);
+	
+	// Player character must have speed scale attribute
+	FRogueAttributeSetSnapshot Snapshot = ActionSystemComp->TakeAttributeSnapshot();
+	FAttributeNumericData SpeedAttribute;
+	ensure(UAttributeSetFunctionLibrary::FindAttributeDataByTag(Snapshot.Attributes, MovementSpeedScaleTag, SpeedAttribute));
+	ActionSystemComp->AttributeSetChangedDelegateCPP.AddUObject(this, &ThisClass::OnAttributeSetChanged);
+	
+	// Apply initial speed scale
+	OriginalMovementMaxSpeed = GetCharacterMovement()->MaxWalkSpeed;
+	GetCharacterMovement()->MaxWalkSpeed = OriginalMovementMaxSpeed * SpeedAttribute.CurrentValue;
 }
 
 void ASPlayerCharacter::Move(const FInputActionValue& InValue)
@@ -85,19 +100,53 @@ void ASPlayerCharacter::Look(const FInputActionValue& InValue)
 	AddControllerPitchInput(Input2D.Y);
 }
 
+void ASPlayerCharacter::SprintStart(const FInputActionValue& InValue)
+{
+	if (!GetCharacterMovement()->IsWalking() or GetCharacterMovement()->MaxWalkSpeed < 10.0f)
+	{
+		return;
+	}
+	
+	URogueGameplayAbility* OutAbility = nullptr;
+	ActionSystemComp->TryActivateAbilityByTag(SprintAbilitySpec.AbilityTag, OutAbility);
+	OutAbility->CommitAbility_Implementation();
+}
+
+void ASPlayerCharacter::SprintStop(const FInputActionValue& InValue)
+{
+	ActionSystemComp->StopAbilityByTag(SprintAbilitySpec.AbilityTag);
+}
+
 void ASPlayerCharacter::PrimaryAttack(const FInputActionValue& InValue)
 {
-	ActionSystemComp->TryActivateAbilityByTag(PrimaryAttackAbilitySpec.AbilityTag);
+	URogueGameplayAbility* OutAbility = nullptr;
+	ActionSystemComp->TryActivateAbilityByTag(PrimaryAttackAbilitySpec.AbilityTag, OutAbility);
 }
 
 void ASPlayerCharacter::SecondaryAttack(const FInputActionValue& InValue)
 {
-	ActionSystemComp->TryActivateAbilityByTag(SecondaryAttackAbilitySpec.AbilityTag);
+	URogueGameplayAbility* OutAbility = nullptr;
+	ActionSystemComp->TryActivateAbilityByTag(SecondaryAttackAbilitySpec.AbilityTag, OutAbility);
 }
 
 void ASPlayerCharacter::SpecialAttack(const FInputActionValue& InValue)
 {
-	ActionSystemComp->TryActivateAbilityByTag(SpecialAttackAbilitySpec.AbilityTag);
+	URogueGameplayAbility* OutAbility = nullptr;
+	ActionSystemComp->TryActivateAbilityByTag(SpecialAttackAbilitySpec.AbilityTag, OutAbility);
+}
+
+void ASPlayerCharacter::OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnapshot, FRogueAttributeSetSnapshot NewSnapshot)
+{
+	// Update movement speed
+	FAttributeNumericData SpeedScaleAttribute;
+	UAttributeSetFunctionLibrary::FindAttributeDataByTag(OldSnapshot.Attributes, MovementSpeedScaleTag, SpeedScaleAttribute);
+	float OldSpeedScale = SpeedScaleAttribute.CurrentValue;
+	UAttributeSetFunctionLibrary::FindAttributeDataByTag(NewSnapshot.Attributes, MovementSpeedScaleTag, SpeedScaleAttribute);
+	float NewSpeedScale = SpeedScaleAttribute.CurrentValue;
+	if (!FMath::IsNearlyEqual(OldSpeedScale, NewSpeedScale))
+	{
+		GetCharacterMovement()->MaxWalkSpeed = OriginalMovementMaxSpeed * NewSpeedScale;
+	}
 }
 
 // IAbilityAttackInfoProvider

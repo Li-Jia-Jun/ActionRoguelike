@@ -36,12 +36,23 @@ public:
 	float GetTimeRemaining() const;
 	
 	void Start();
+	
+	bool Matches(const URogueGameplayEffectInstance& Other) const
+	{
+		return Template->EffectTag.MatchesTag(Other.Template->EffectTag);
+	};
 
 	FOnGameplayEffectInstanceFinishedSignature OnFinishedDelegate;
 	
 	bool operator==(const URogueGameplayEffectInstance& Other) const
 	{
 		return Template->EffectTag.MatchesTag(Other.Template->EffectTag);
+	}
+	
+	// Infinite apply needs other systems to terminate instance, so an explicit terminate public function
+	void Terminate()
+	{
+		Finish();
 	}
 
 protected:
@@ -65,6 +76,8 @@ protected:
 	TObjectPtr<URogueGameplayEffectDurationPolicyInstance> DurationPolicyInstance;
 	
 	uint8 StackIndex;
-	
+
+	bool bFinished = false;
+
 	friend class URogueActionSystemComponent;
 };

@@ -41,26 +41,30 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
 	TObjectPtr<URogueGameplayEffect> CooldownEffect;
 	
+	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability",
+		meta = (ToolTip = "Effects applied during active. Must be debuff modify policy and inifite duration policy"))
+	TArray<TObjectPtr<URogueGameplayEffect>> ActiveEffects;
+	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
 	ERogueGameplayAbilityInstancePolicy InstancePolicy;
 	
 	UPROPERTY(BlueprintCallable, Category = "Rogue Gameplay Ability")
 	FAbilityEndedSignature AbilityEndedDelegate;
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
-	virtual bool CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const;
+	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	bool CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const;
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
-	virtual bool CanActivateAbility() const;
+	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	bool CanActivateAbility() const;
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
-	virtual void ActivateAbility();
+	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	void ActivateAbility();
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
-	virtual bool CommitAbility();
+	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	bool CommitAbility();
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
-	virtual void EndAbility();
+	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	void EndAbility();
 	
 	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
 	float CooldownTimeRemaining() const;
@@ -68,6 +72,11 @@ public:
 	bool operator==(const URogueGameplayAbility& Other) const
 	{
 		return AbilityTag.MatchesTag(Other.AbilityTag);
+	}
+	
+	bool Matches(const FGameplayTag& OtherTag) const
+	{
+		return AbilityTag.MatchesTag(OtherTag);
 	}
 
 protected:
@@ -92,6 +101,8 @@ protected:
 	PURE_VIRTUAL(URogueGameplayAbility::OnAnimMontageEventReceived, );
 	
 	TWeakObjectPtr<URogueGameplayEffectInstance> CooldownEffectInstance;
+	
+	TArray<TWeakObjectPtr<URogueGameplayEffectInstance>> ActiveEffectInstances;
 	
 	TWeakObjectPtr<UAnimInstance> AnimInstanceToTrack;
 	FGameplayTag EventTagToTrack;

@@ -48,7 +48,9 @@ public:
 	
 	bool GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls, FRogueGameplayAbilitySpec& OutAbilitySpec);
 	
-	bool TryActivateAbilityByTag(FGameplayTag AbilityTag);
+	bool TryActivateAbilityByTag(FGameplayTag AbilityTag, URogueGameplayAbility*& OutAbility);
+	
+	bool StopAbilityByTag(FGameplayTag AbilityTag);
 	
 	bool CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
 	
@@ -94,7 +96,7 @@ protected:
 	
 	void AddActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance);
 	
-	void RemoveActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance);
+	bool RemoveActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance);
 	
 	UFUNCTION()
 	void OnActiveGameplayEffectFinished(URogueGameplayEffectInstance* InGameplayEffectInstance);
@@ -109,6 +111,9 @@ protected:
 	
 	UFUNCTION()
 	void OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData);
+	
+	UFUNCTION(BlueprintCallable, Category="GameplayAbility")
+	bool IsAbilityActiveByTag(FGameplayTag AbilityTag) const;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="GameplayAbility")
 	TArray<FRogueGameplayAbilitySpec> GrantedAbilitySpecs;

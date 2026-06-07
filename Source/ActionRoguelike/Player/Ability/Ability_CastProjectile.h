@@ -41,13 +41,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Projectile")
 	USoundBase* CastingSound;
 	
-	virtual bool CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const override;
+	virtual bool CheckCanBeGranted_Implementation(URogueActionSystemComponent* ActionSystemComponent) const override;
 	
-	virtual void ActivateAbility() override;
+	virtual void ActivateAbility_Implementation() override;
 	
-	virtual bool CommitAbility() override;
+	virtual bool CommitAbility_Implementation() override;
 	
-	virtual void EndAbility() override;
+	virtual void EndAbility_Implementation() override;
 	
 	void CastProjectile();
 	

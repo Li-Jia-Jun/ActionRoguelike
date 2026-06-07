@@ -15,7 +15,7 @@ TAutoConsoleVariable<float> CVarProjectileDebugDrawing(TEXT("game.ability.CastPr
 	TEXT("Enable casting projectile debug rendering. (0 = off, > 0 is duration)"),
 	ECVF_Cheat);
 
-bool UAbility_CastProjectile::CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const
+bool UAbility_CastProjectile::CheckCanBeGranted_Implementation(URogueActionSystemComponent* ActionSystemComponent) const
 {
 	AActor* OwnerActor = ActionSystemComponent->GetOwner();
 	
@@ -43,11 +43,13 @@ bool UAbility_CastProjectile::CheckCanBeGranted(URogueActionSystemComponent* Act
 		return false;
 	}
 	
-	return Super::CheckCanBeGranted(ActionSystemComponent);
+	return Super::CheckCanBeGranted_Implementation(ActionSystemComponent);
 }
 
-void UAbility_CastProjectile::ActivateAbility()
+void UAbility_CastProjectile::ActivateAbility_Implementation()
 {
+	Super::ActivateAbility_Implementation();
+	
 	// Reset last run
 	ResetState();
 	
@@ -67,9 +69,9 @@ void UAbility_CastProjectile::ActivateAbility()
 	UGameplayStatics::PlaySound2D(this, CastingSound, 0.6f);
 }
 
-bool UAbility_CastProjectile::CommitAbility()
+bool UAbility_CastProjectile::CommitAbility_Implementation()
 {
-	if (not Super::CommitAbility())
+	if (not Super::CommitAbility_Implementation())
 	{
 		return false;
 	}
@@ -79,9 +81,9 @@ bool UAbility_CastProjectile::CommitAbility()
 	return true;
 }
 
-void UAbility_CastProjectile::EndAbility()
+void UAbility_CastProjectile::EndAbility_Implementation()
 {
-	Super::EndAbility();
+	Super::EndAbility_Implementation();
 	
 	// Stop anim if it is running
 	if (OwnerCharacter.IsValid())

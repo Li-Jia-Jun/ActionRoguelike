@@ -43,6 +43,7 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 	// Manual effect instances finish
 	for (auto Instance : GameplayEffectInstances)
 	{
+		Instance->OnFinishedDelegate.RemoveAll(this);
 		Instance->Finish();
 	}
 	GameplayEffectInstances.Empty();
@@ -107,7 +108,7 @@ bool URogueActionSystemComponent::GrantGameplayAbility(TSubclassOf<URogueGamepla
 	return true;
 }
 
-bool URogueActionSystemComponent::TryActivateAbilityByTag(FGameplayTag AbilityTag)
+bool URogueActionSystemComponent::TryActivateAbilityByTag(FGameplayTag AbilityTag, URogueGameplayAbility*& OutAbility)
 {
 	FRogueGameplayAbilitySpec FoundAbility;
 	if (!FindGrantedAbility(AbilityTag, FoundAbility))
@@ -128,15 +129,28 @@ bool URogueActionSystemComponent::TryActivateAbilityByTag(FGameplayTag AbilityTa
 		}
 	}
 	
-	URogueGameplayAbility* Ability = nullptr;
-	if (ActivateAbilityBySpec(FoundAbility, Ability))
+	if (ActivateAbilityBySpec(FoundAbility, OutAbility))
 	{
 		// Register end ability callback
-		if (Ability->InstancePolicy != ERogueGameplayAbilityInstancePolicy::eNotInstanced)
+		if (OutAbility->InstancePolicy != ERogueGameplayAbilityInstancePolicy::eNotInstanced)
 		{
-			Ability->AbilityEndedDelegate.AddUniqueDynamic(this, &URogueActionSystemComponent::OnAbilityEnded);
+			OutAbility->AbilityEndedDelegate.AddUniqueDynamic(this, &URogueActionSystemComponent::OnAbilityEnded);
 		}
 		return true;
+	}
+	
+	return false;
+}
+
+bool URogueActionSystemComponent::StopAbilityByTag(FGameplayTag AbilityTag)
+{
+	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
+	{
+		if (ActiveAbility->AbilityTag.MatchesTag(AbilityTag))
+		{
+			ActiveAbility->EndAbility();
+			return true;
+		}
 	}
 	
 	return false;
@@ -188,6 +202,19 @@ void URogueActionSystemComponent::OnAbilityEnded(URogueGameplayAbility* Ability,
 			break;
 		}
 	}
+}
+
+bool URogueActionSystemComponent::IsAbilityActiveByTag(FGameplayTag AbilityTag) const
+{
+	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
+	{
+		if (ActiveAbility->AbilityTag.MatchesTag(AbilityTag))
+		{
+			return true;
+		}
+	}
+	
+	return false;
 }
 
 bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const
@@ -336,23 +363,32 @@ void URogueActionSystemComponent::AddActiveGameplayEffect(URogueGameplayEffectIn
 	GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
 }
 
-void URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance)
+bool URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance)
 {
-	if (GameplayEffectInstances.Contains(GameplayEffectInstance))
+	for (URogueGameplayEffectInstance* EffectInstance : GameplayEffectInstances)
 	{
-		TArray<FGameplayTag> OldTags = GetActiveGameplayEffectTags();
+		if (EffectInstance->Matches(*GameplayEffectInstance))
+		{
+			TArray<FGameplayTag> OldTags = GetActiveGameplayEffectTags();
 			
-		// Remove effect instance from list
-		GameplayEffectInstance->OnFinishedDelegate.RemoveAll(this);
-		GameplayEffectInstances.Remove(GameplayEffectInstance);
+			// Remove effect instance from list
+			GameplayEffectInstance->OnFinishedDelegate.RemoveAll(this);
+			GameplayEffectInstances.Remove(GameplayEffectInstance);
 			
-		TArray<FGameplayTag> NewTags = OldTags;
-		NewTags.Remove(GameplayEffectInstance->Template->EffectTag);
-		GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
+			TArray<FGameplayTag> NewTags = OldTags;
+			NewTags.Remove(GameplayEffectInstance->Template->EffectTag);
+			GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
 		
-		// GC
-		GameplayEffectInstance->MarkAsGarbage();
+			// GC
+			GameplayEffectInstance->MarkAsGarbage();
+		
+			return true;
+		}
 	}
+	
+	UE_LOG(LogTemp, Warning, TEXT("%s Failed to remove active gameplay effect instance %s because it is not in list."), 
+	*GetOwner()->GetName(), *GameplayEffectInstance->Template->GetName());
+	return false;
 }
 
 void URogueActionSystemComponent::OnActiveGameplayEffectFinished(URogueGameplayEffectInstance* GameplayEffectInstance)

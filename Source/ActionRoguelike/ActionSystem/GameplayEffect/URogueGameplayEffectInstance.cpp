@@ -61,12 +61,16 @@ void URogueGameplayEffectInstance::Apply()
 			Debuff.Tag = Template->EffectTag;
 			Debuff.StackIndex = StackIndex;
 		}
-		OwnerActionSystemComponent->ApplyGameplayEffectDebuffs(DebuffApplyData->Debuffs);
+		OwnerActionSystemComponent->ApplyGameplayEffectDebuffs(Debuffs);
 	}
 }
 
 void URogueGameplayEffectInstance::Finish()
 {
+	if (bFinished) return;
+	bFinished = true;
+
+	// Handle debuff removal
 	if (const FRogueGameplayEffectDebuffModify* DebuffApplyData = Template->ModifyPolicy.GetPtr<FRogueGameplayEffectDebuffModify>())
 	{
 		TArray<FAttributeDebuffData> Debuffs = DebuffApplyData->Debuffs;

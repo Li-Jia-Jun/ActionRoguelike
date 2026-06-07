@@ -6,7 +6,7 @@
 #include "GameFramework/Character.h"
 #include "ActionSystem/Interface/AbilityAttackInfoProvider.h"
 #include "ActionSystem/GameplayAbility/FRogueGameplayAbilitySpec.h"
-#include "Projectile/RogueProjectileBase.h"
+#include "ActionSystem/AttributeSet//RogueAttributeSet.h"
 #include "SPlayerCharacter.generated.h"
 
 
@@ -44,17 +44,24 @@ protected:
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Attack")
 	TSubclassOf<URogueGameplayAbility> PrimaryAttackAbilityCls;
+	FRogueGameplayAbilitySpec PrimaryAttackAbilitySpec; 
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Attack")
 	TSubclassOf<URogueGameplayAbility> SecondaryAttackAbilityCls;
+	FRogueGameplayAbilitySpec SecondaryAttackAbilitySpec;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Attack")
 	TSubclassOf<URogueGameplayAbility> SpecialAttackAbilityCls;
-	
-	// Cache from ASC
-	FRogueGameplayAbilitySpec PrimaryAttackAbilitySpec; 
-	FRogueGameplayAbilitySpec SecondaryAttackAbilitySpec;
 	FRogueGameplayAbilitySpec SpecialAttackAbilitySpec;
+	
+	UPROPERTY(EditDefaultsOnly, Category = "Movement")
+	FGameplayTag MovementSpeedScaleTag;
+	
+	UPROPERTY(EditDefaultsOnly, Category = "Movement")
+	TSubclassOf<URogueGameplayAbility> SprintAbilityCls;
+	FRogueGameplayAbilitySpec SprintAbilitySpec;
+	
+	float OriginalMovementMaxSpeed = 0.0f;
 	
 	UPROPERTY(EditDefaultsOnly, Category="Death")
 	TObjectPtr<UAnimMontage> DeathMontage;
@@ -77,6 +84,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> Input_Jump;
 	
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> Input_Sprint;
+	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
 	TObjectPtr<URogueActionSystemComponent> ActionSystemComp;
 	
@@ -89,10 +99,16 @@ protected:
 	void Move(const FInputActionValue& InValue);
 
 	void Look(const FInputActionValue& InValue);
+	
+	void SprintStart(const FInputActionValue& InValue);
+	
+	void SprintStop(const FInputActionValue& InValue);
 
 	void PrimaryAttack(const FInputActionValue& InValue);
 	
 	void SecondaryAttack(const FInputActionValue& InValue);
 	
 	void SpecialAttack(const FInputActionValue& InValue);
+	
+	void OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnapshot, FRogueAttributeSetSnapshot NewSnapshot);
 };

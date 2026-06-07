@@ -8,17 +8,18 @@
 #include "ActionSystem/GameplayEffect/URogueGameplayEffectInstance.h"
 
 
-bool URogueGameplayAbility::CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const
+bool URogueGameplayAbility::CheckCanBeGranted_Implementation(URogueActionSystemComponent* ActionSystemComponent) const
 {
 	return true;
 }
 
-bool URogueGameplayAbility::CanActivateAbility() const
+bool URogueGameplayAbility::CanActivateAbility_Implementation() const
 {
 	// Cost check 
-	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CostEffect, this))
+	if (CostEffect && !OwnerActionSystemComponent->CanApplyGameplayEffect(CostEffect, this))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to cost effect apply failure."), *GetName());
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to unable to apply cost effect %s."), 
+			*GetName(), *CostEffect->GetName());
 		return false;
 	}
 	
@@ -29,22 +30,34 @@ bool URogueGameplayAbility::CanActivateAbility() const
 			*GetName(), CooldownEffectInstance->GetTimeRemaining());
 		return false;
 	}
-	if (!OwnerActionSystemComponent->CanApplyGameplayEffect(CooldownEffect, this))
+	if (CooldownEffect && !OwnerActionSystemComponent->CanApplyGameplayEffect(CooldownEffect, this))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to cooldown effect apply failure."), *GetName());
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to unable to apply cooldown effect %s."), 
+			*GetName(), *CooldownEffect->GetName());
 			return false;
+	}
+	
+	// Active effects check
+	for (const TObjectPtr<URogueGameplayEffect>& ActiveEffect : ActiveEffects)
+	{
+		if (!OwnerActionSystemComponent->CanApplyGameplayEffect(ActiveEffect, this))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated due to unable to apply active effect %s."), 
+				*GetName(), *ActiveEffect->GetName());
+			return false;
+		}
 	}
 	
 	return true;
 }
 
-void URogueGameplayAbility::ActivateAbility()
+void URogueGameplayAbility::ActivateAbility_Implementation()
 {
 	// Status
 	bIsActivated = true;
 }
 
-bool URogueGameplayAbility::CommitAbility()
+bool URogueGameplayAbility::CommitAbility_Implementation()
 {
 	if (!CanActivateAbility())
 	{
@@ -52,21 +65,45 @@ bool URogueGameplayAbility::CommitAbility()
 	}
 	
 	// Apply cost effect (instant) so there will be no instance
-	URogueGameplayEffectInstance* OutCostEffectInstance = nullptr;
-	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CostEffect, this, false, OutCostEffectInstance);
+	if (CostEffect)
+	{
+		URogueGameplayEffectInstance* OutCostEffectInstance = nullptr;
+		OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CostEffect, this, false, OutCostEffectInstance);
+	}
 	
 	// Apply cooldown effect and save its pointer
-	URogueGameplayEffectInstance* OutCooldownEffectInstance = nullptr;
-	OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CooldownEffect, this, false, OutCooldownEffectInstance);
-	CooldownEffectInstance = OutCooldownEffectInstance;
+	if (CooldownEffect)
+	{
+		URogueGameplayEffectInstance* OutCooldownEffectInstance = nullptr;
+		OwnerActionSystemComponent->ApplyGameplayEffectToSelf(CooldownEffect, this, false, OutCooldownEffectInstance);
+		CooldownEffectInstance = OutCooldownEffectInstance;
+	}
+	
+	// Apply active effects
+	for (const TObjectPtr<URogueGameplayEffect>& ActiveEffect : ActiveEffects)
+	{
+		URogueGameplayEffectInstance *EffectInstance = nullptr;
+		OwnerActionSystemComponent->ApplyGameplayEffectToSelf(ActiveEffect, this, false, EffectInstance);
+		ActiveEffectInstances.Add(TWeakObjectPtr<URogueGameplayEffectInstance>(EffectInstance));
+	}
 	
 	return true;
 }
 
-void URogueGameplayAbility::EndAbility()
+void URogueGameplayAbility::EndAbility_Implementation()
 {
 	// Status
 	bIsActivated = false;
+	
+	// Clean up active effects
+	for (auto EffectInstance : ActiveEffectInstances)
+	{
+		if (EffectInstance.IsValid())
+		{
+			EffectInstance->Terminate();
+		}
+	}
+	ActiveEffectInstances.Empty();
 	
 	// Clean up delegate
 	OwnerActionSystemComponent->GameplayEventReceivedDelegate.RemoveAll(this);
@@ -128,13 +165,13 @@ void URogueGameplayAbility::PlayAnimMontageAndTrackEvent(UAnimMontage* Montage, 
 EDataValidationResult URogueGameplayAbility::IsDataValid(FDataValidationContext& Context) const
 {
 	// Cost effect rules
-	if (CostEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectInstantApply::StaticStruct())
+	if (CostEffect && CostEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectInstantApply::StaticStruct())
 	{
 		return EDataValidationResult::Invalid;
 	}
 	
 	// Cooldown effect rules
-	if (CooldownEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectDurationApply::StaticStruct())
+	if (CooldownEffect && CooldownEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectDurationApply::StaticStruct())
 	{
 		return EDataValidationResult::Invalid;
 	}
