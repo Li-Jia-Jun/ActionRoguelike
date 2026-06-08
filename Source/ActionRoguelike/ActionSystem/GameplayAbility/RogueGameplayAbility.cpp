@@ -15,6 +15,17 @@ bool URogueGameplayAbility::CheckCanBeGranted_Implementation(URogueActionSystemC
 
 bool URogueGameplayAbility::CanActivateAbility_Implementation() const
 {
+	// Tags check
+	for (const FGameplayTag& Tag : TagsThatBlock)
+	{
+		if (OwnerActionSystemComponent->HasActiveTag(Tag))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated, blocked by tag %s."), 
+				*GetName(), *Tag.ToString());
+			return false;
+		}
+	}
+	
 	// Cost check 
 	if (CostEffect && !OwnerActionSystemComponent->CanApplyGameplayEffect(CostEffect, this))
 	{
@@ -87,6 +98,12 @@ bool URogueGameplayAbility::CommitAbility_Implementation()
 		ActiveEffectInstances.Add(TWeakObjectPtr<URogueGameplayEffectInstance>(EffectInstance));
 	}
 	
+	// Grant tags
+	for (const FGameplayTag& Tag : TagsToGrant)
+	{
+		OwnerActionSystemComponent->GrantActiveTag(Tag);
+	}
+	
 	return true;
 }
 
@@ -113,6 +130,12 @@ void URogueGameplayAbility::EndAbility_Implementation()
 	{
 		AnimInstanceToTrack->Montage_Stop(0.0f);
 		AnimInstanceToTrack->OnMontageEnded.RemoveAll(this);
+	}
+	
+	// Clean up granted tags
+	for (const FGameplayTag& Tag : TagsToGrant)
+	{
+		OwnerActionSystemComponent->RemoveActiveTag(Tag);
 	}
 	
 	// Broadcast ending

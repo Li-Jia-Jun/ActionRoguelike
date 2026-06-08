@@ -46,6 +46,12 @@ public:
 	
 	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
 	
+	void GrantActiveTag(const FGameplayTag Tag);
+	
+	bool RemoveActiveTag(const FGameplayTag Tag);
+	
+	bool HasActiveTag(const FGameplayTag Tag) const;
+	
 	bool GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls, FRogueGameplayAbilitySpec& OutAbilitySpec);
 	
 	bool TryActivateAbilityByTag(FGameplayTag AbilityTag, URogueGameplayAbility*& OutAbility);
@@ -102,6 +108,13 @@ protected:
 	void OnActiveGameplayEffectFinished(URogueGameplayEffectInstance* InGameplayEffectInstance);
 	
 	TArray<FGameplayTag> GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& GameplayEffectInstances);
+	
+	// Gameplay Tags
+	
+	// Active tags and their counts. Multiple data sources:
+	// - GA granted tags 
+	// - GE debuff tags
+	TMap<FGameplayTag, int> ActiveTagCountMap;
 	
 	// Gameplay Ability
 	

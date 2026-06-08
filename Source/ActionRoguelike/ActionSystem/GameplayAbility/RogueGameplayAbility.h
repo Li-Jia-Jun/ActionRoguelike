@@ -35,6 +35,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
 	FGameplayTag AbilityTag;
 	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
+	FGameplayTagContainer TagsToGrant;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rogue Gameplay Ability")
+	FGameplayTagContainer TagsThatBlock;
+	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
 	TObjectPtr<URogueGameplayEffect> CostEffect;
 	

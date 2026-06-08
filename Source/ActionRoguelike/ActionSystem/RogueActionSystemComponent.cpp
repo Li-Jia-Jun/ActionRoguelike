@@ -48,8 +48,54 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 	}
 	GameplayEffectInstances.Empty();
 	
+	// Clean up active abilities
+	for (URogueGameplayAbility* Ability : ActiveAbilities)
+	{
+		Ability->AbilityEndedDelegate.RemoveAll(this);
+		Ability->EndAbility();
+	}
+	ActiveAbilities.Empty();
+	
 	Super::OnComponentDestroyed(bDestroyingHierarchy);
 }
+
+// Gameplay Tags
+
+bool URogueActionSystemComponent::HasActiveTag(const FGameplayTag Tag) const
+{
+	return ActiveTagCountMap.Contains(Tag);
+}
+
+void URogueActionSystemComponent::GrantActiveTag(const FGameplayTag Tag)
+{
+	if (!ActiveTagCountMap.Contains(Tag))
+	{
+		ActiveTagCountMap.Add(Tag, 1);
+	}
+	else
+	{
+		ActiveTagCountMap[Tag] += 1;
+	}
+}
+	
+bool URogueActionSystemComponent::RemoveActiveTag(const FGameplayTag Tag)
+{
+	if (ActiveTagCountMap.Contains(Tag))
+	{
+		ActiveTagCountMap[Tag] -= 1;
+		if (ActiveTagCountMap[Tag] <= 0)
+		{
+			ActiveTagCountMap.Remove(Tag);
+		}
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+// Ability
 
 bool URogueActionSystemComponent::FindGrantedAbility(FGameplayTag AbilityTag, FRogueGameplayAbilitySpec& OutAbilitySpec)
 {
@@ -193,6 +239,7 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 
 void URogueActionSystemComponent::OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData)
 {
+	// Remove ability from active list
 	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
 	{
 		if (ActiveAbility->AbilityTag.MatchesTag(Ability->AbilityTag))
@@ -216,6 +263,8 @@ bool URogueActionSystemComponent::IsAbilityActiveByTag(FGameplayTag AbilityTag) 
 	
 	return false;
 }
+
+// Gameplay Effect
 
 bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const
 {
@@ -260,31 +309,19 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 		return false;
 	}
 	
-	// Early exit for instant apply
+	// Early exit for instant apply (instant apply is guaranteed to use permanent modify)
 	if (GameplayEffect->DurationPolicy.GetScriptStruct() == FRogueGameplayEffectInstantApply::StaticStruct())
 	{
-		if (const FRogueGameplayEffectPermanentModify* PermanentModify = GameplayEffect->ModifyPolicy.GetPtr<FRogueGameplayEffectPermanentModify>())
-		{
-			ApplyGameplayEffectModifiers(PermanentModify->Modifiers);
-			return true;
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Unsupported gameplay effect type for instant apply: %s"), *GameplayEffect->GetName());
-		}
+		const FRogueGameplayEffectPermanentModify* PermanentModify = GameplayEffect->ModifyPolicy.GetPtr<FRogueGameplayEffectPermanentModify>();
+		ApplyGameplayEffectModifiers(PermanentModify->Modifiers);
+		return true;
 	}
 	
 	// Create instances for all non-instant effects
 	URogueGameplayEffectInstance* EffectInstance = NewObject<URogueGameplayEffectInstance>(GetOwner());
 	
 	// Handle stack policy
-	int StackCount = 0;
-	if (GameplayEffect->StackPolicy == ERogueGameplayEffectStackPolicy::eAccumulate or 
-		GameplayEffect->StackPolicy == ERogueGameplayEffectStackPolicy::eIndependent)
-	{
-		StackCount = GetGameplayEffectStackCount(GameplayEffect);
-	}
-	else if (GameplayEffect->StackPolicy == ERogueGameplayEffectStackPolicy::eRefresh)
+	if (GameplayEffect->StackPolicy == ERogueGameplayEffectStackPolicy::eRefresh)
 	{
 		// Remove the last instance
 		for (URogueGameplayEffectInstance* ExistingInstance : GameplayEffectInstances)
@@ -301,7 +338,7 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 	// On finish notification so that this instance can be removed from active list
 	EffectInstance->OnFinishedDelegate.AddDynamic(this, &URogueActionSystemComponent::OnActiveGameplayEffectFinished);
 	
-	EffectInstance->Init(GameplayEffect, this, Sender, StackCount);
+	EffectInstance->Init(GameplayEffect, this, Sender);
 	
 	AddActiveGameplayEffect(EffectInstance);
 	
@@ -328,6 +365,12 @@ void URogueActionSystemComponent::ApplyGameplayEffectDebuffs(const TArray<FAttri
 	
 	AttributeSet->ApplyDebuffs(Debuffs);
 	
+	// Update active tags
+	for (const FAttributeDebuffData& Debuff : Debuffs)
+	{
+		GrantActiveTag(Debuff.Tag);
+	}
+	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
 	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
 }
@@ -337,6 +380,12 @@ void URogueActionSystemComponent::RemoveGameplayEffectDebuffs(const TArray<FAttr
 	FRogueAttributeSetSnapshot OldSnapshot = AttributeSet->TakeSnapshot();
 	
 	AttributeSet->RemoveDebuffs(Debuffs);
+	
+	// Update active tags
+	for (const FAttributeDebuffData& Debuff : Debuffs)
+	{
+		RemoveActiveTag(Debuff.Tag);
+	}
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
 	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
@@ -367,7 +416,7 @@ bool URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffec
 {
 	for (URogueGameplayEffectInstance* EffectInstance : GameplayEffectInstances)
 	{
-		if (EffectInstance->Matches(*GameplayEffectInstance))
+		if (EffectInstance->MatchesTag(*GameplayEffectInstance))
 		{
 			TArray<FGameplayTag> OldTags = GetActiveGameplayEffectTags();
 			
@@ -405,40 +454,23 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(const URogueGam
 	}
 	
 	// Pre-condition checks
-	if (GameplayEffect->PreconditionEffects.Num() > 0)
+	for (const FGameplayTag& RequireTag : GameplayEffect->TagsThatRequire)
 	{
-		for (const FGameplayTag& PreconditionTag : GameplayEffect->PreconditionEffects)
+		if (!HasActiveTag(RequireTag))
 		{
-			bool bHasPrecondition = false;
-			for (FAttributeDebuffData& Debuff : AttributeSet->Debuffs)
-			{
-				if (Debuff.Tag.MatchesTag(PreconditionTag))
-				{
-					bHasPrecondition = true;
-					break;
-				}
-			}
-			
-			if (!bHasPrecondition)
-			{
-				FailMessage.Append("Missing precondition " + PreconditionTag.ToString());
-				return false;
-			}
+			FailMessage.Append("Missing required tag " + RequireTag.ToString());
+			return false;
 		}
 	}
 	
-	// Immunity checks
-	if (GameplayEffect->ImmunityEffects.Num() > 0)
+	if (GameplayEffect->TagsThatBlock.Num() > 0)
 	{
-		for (const FGameplayTag& ImmunityTag : GameplayEffect->ImmunityEffects)
+		for (const FGameplayTag& Tag : GameplayEffect->TagsThatBlock)
 		{
-			for (FAttributeDebuffData& Debuff : AttributeSet->Debuffs)
+			if (HasActiveTag(Tag))
 			{
-				if (Debuff.Tag.MatchesTag(ImmunityTag))
-				{
-					FailMessage.Append("immune due to tag " + ImmunityTag.ToString());
-					return false;
-				}
+				FailMessage.Append("blocked by tag " + Tag.ToString());
+				return false;
 			}
 		}
 	}
@@ -482,6 +514,8 @@ TArray<FGameplayTag> URogueActionSystemComponent::GetActiveGameplayEffectTags() 
 	return Tags;
 }
 
+// Attribute Set
+
 void URogueActionSystemComponent::BroadcastAttributeSetChanged(const FRogueAttributeSetSnapshot& OldSnapshot, const FRogueAttributeSetSnapshot& NewSnapshot) const
 {
 	AttributeSetChangedDelegateCPP.Broadcast(OldSnapshot, NewSnapshot);
@@ -497,6 +531,8 @@ FRogueAttributeSetSnapshot URogueActionSystemComponent::TakeAttributeSnapshot() 
 {
 	return AttributeSet->TakeSnapshot();
 }
+
+// Gameplay Event
 
 void URogueActionSystemComponent::HandleGameplayEvent(FGameplayTag EventTag, const FRogueGameplayEventData& Payload)
 {

@@ -9,12 +9,11 @@
 
 
 void URogueGameplayEffectInstance::Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-	const UObject* InSender, uint8 InStackIndex)
+	const UObject* InSender)
 {
 	Template = InTemplate;
 	OwnerActionSystemComponent = InOwnerActionSystemComponent;
 	Sender = InSender;
-	StackIndex = InStackIndex;
 }
 
 float URogueGameplayEffectInstance::GetTimeRemaining() const
@@ -58,8 +57,8 @@ void URogueGameplayEffectInstance::Apply()
 		TArray<FAttributeDebuffData> Debuffs = DebuffApplyData->Debuffs;
 		for (FAttributeDebuffData& Debuff : Debuffs)
 		{
-			Debuff.Tag = Template->EffectTag;
-			Debuff.StackIndex = StackIndex;
+			Debuff.Handle = FAttributeDebuffHandle::GenerateNewHandle(); // Generate handle for tracking
+			DebuffHandles.Add(Debuff.Handle);
 		}
 		OwnerActionSystemComponent->ApplyGameplayEffectDebuffs(Debuffs);
 	}
@@ -74,10 +73,10 @@ void URogueGameplayEffectInstance::Finish()
 	if (const FRogueGameplayEffectDebuffModify* DebuffApplyData = Template->ModifyPolicy.GetPtr<FRogueGameplayEffectDebuffModify>())
 	{
 		TArray<FAttributeDebuffData> Debuffs = DebuffApplyData->Debuffs;
-		for (FAttributeDebuffData& Debuff : Debuffs)
+		ensure(Debuffs.Num() == DebuffHandles.Num());
+		for (int i = 0; i < Debuffs.Num(); ++i)
 		{
-			Debuff.Tag = Template->EffectTag;
-			Debuff.StackIndex = StackIndex;
+			Debuffs[i].Handle = DebuffHandles[i];
 		}
 		OwnerActionSystemComponent->RemoveGameplayEffectDebuffs(Debuffs);
 	}

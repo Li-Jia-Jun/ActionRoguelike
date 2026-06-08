@@ -6,7 +6,7 @@
 #include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 #include "Engine/DataAsset.h"
-#include "RogueGameplayEffectModifier.h"
+#include "GameplayTagContainer.h"
 #include "StructUtils/InstancedStruct.h"
 #include "RogueGameplayEffect.generated.h"
 
@@ -48,10 +48,14 @@ public:
 	uint8 StackLimit;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect", 
-		meta = (ToolTips = "Do not apply this effect when target objects have any effect from this list"))
-	TArray<FGameplayTag> ImmunityEffects;
+		meta = (ToolTips = "Tags that block this effect from apply"))
+	FGameplayTagContainer TagsThatBlock;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect",
-		meta = (ToolTips = "Can only apply this effect when target objects have all the effects from this list"))
-	TArray<FGameplayTag> PreconditionEffects;
+		meta = (ToolTips = "Tags that are present before this effect can apply"))
+	FGameplayTagContainer TagsThatRequire;// PreconditionTags
+	
+#if WITH_EDITOR
+	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
+#endif
 };

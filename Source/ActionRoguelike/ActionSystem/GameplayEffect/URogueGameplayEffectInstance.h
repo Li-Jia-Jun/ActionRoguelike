@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "RogueGameplayEffect.h"
 #include "RogueGameplayEffectDurationPolicy.h"
+#include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 #include "UObject/Object.h"
 #include "URogueGameplayEffectInstance.generated.h"
 
@@ -31,22 +32,22 @@ class ACTIONROGUELIKE_API URogueGameplayEffectInstance : public UObject
 		
 public:
 	void Init(const URogueGameplayEffect* InTemplate, URogueActionSystemComponent* InOwnerActionSystemComponent, 
-		const UObject* InSender, uint8 InStackIndex = 0);
+		const UObject* InSender);
 	
 	float GetTimeRemaining() const;
 	
 	void Start();
 	
-	bool Matches(const URogueGameplayEffectInstance& Other) const
-	{
-		return Template->EffectTag.MatchesTag(Other.Template->EffectTag);
-	};
-
 	FOnGameplayEffectInstanceFinishedSignature OnFinishedDelegate;
+	
+	bool MatchesTag(const URogueGameplayEffectInstance& OtherInstance) const
+	{
+		return Template->EffectTag.MatchesTag(OtherInstance.Template->EffectTag);
+	}
 	
 	bool operator==(const URogueGameplayEffectInstance& Other) const
 	{
-		return Template->EffectTag.MatchesTag(Other.Template->EffectTag);
+		return Template->EffectTag.MatchesTag(Other.Template->EffectTag) and Sender == Other.Sender;
 	}
 	
 	// Infinite apply needs other systems to terminate instance, so an explicit terminate public function
@@ -74,9 +75,9 @@ protected:
 	
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<URogueGameplayEffectDurationPolicyInstance> DurationPolicyInstance;
-	
-	uint8 StackIndex;
 
+	TArray<FAttributeDebuffHandle> DebuffHandles;
+	
 	bool bFinished = false;
 
 	friend class URogueActionSystemComponent;

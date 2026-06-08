@@ -10,9 +10,8 @@
 
 
 // 3 types of attributes:
-// - 1. Numeric values (Health, Stamina) - NumericData classes
-// - 2. Debuff (isCursed) - GameplayTag + Modifiers (optional), a temporary condition
-// - TODO:: 3. States (Mental state: depressed, calm, happy) - Custom enum class so that we can see dropdown in editor
+// - 1. Numeric valuee - NumericData classes. E.g. Health, Stamina
+// - 2. Debuff (isCursed) - GameplayTag + Modifiers (optional), a temporary condition. E.g. {Status.Burn, Health -= 1}
 
 class URogueAttributeSet;
 struct FRogueAttributeRelationship;
@@ -46,23 +45,69 @@ struct FAttributeNumericData
 
 
 USTRUCT(BlueprintType)
+struct FAttributeDebuffHandle
+{
+	GENERATED_BODY()
+	
+	FAttributeDebuffHandle() : Handle(INDEX_NONE) {}
+	
+	static FAttributeDebuffHandle GenerateNewHandle()
+	{
+		static int32 GHandleID = 0;
+		return FAttributeDebuffHandle(GHandleID++);
+	}
+	
+	bool IsValid() const
+	{
+		return Handle != INDEX_NONE;
+	}
+	
+	void Invalidate()
+	{
+		Handle = INDEX_NONE;
+	}
+	
+	bool operator==(const FAttributeDebuffHandle& Other) const
+	{
+		return Handle == Other.Handle;
+	}
+	
+	bool operator!=(const FAttributeDebuffHandle& Other) const
+	{
+		return Handle != Other.Handle;
+	}
+	
+	friend uint32 GetTypeHash(const FAttributeDebuffHandle& InHandle)
+	{
+		return GetTypeHash(InHandle.Handle);
+	}
+	
+private:
+	
+	explicit FAttributeDebuffHandle(int32 InHandle) : Handle(InHandle) {}
+	
+	int32 Handle;
+};
+
+USTRUCT(BlueprintType)
 struct FAttributeDebuffData
 {
 	GENERATED_BODY()
 	
-	FGameplayTag Tag; // Cache from GameplayEffect instance
-	
-	uint8 StackIndex; // Cache from GameplayEffect instance
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
+	FGameplayTag Tag;
 	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
 	TArray<FRogueGameplayEffectModifier> Modifiers;
 	
+	UPROPERTY(BlueprintReadOnly)
+	FAttributeDebuffHandle Handle;
+	
 	bool operator==(const FAttributeDebuffData& other) const 
 	{
-		return Tag.MatchesTag(other.Tag) and StackIndex == other.StackIndex;
+		return Handle == other.Handle;
 	}
 };
-
 
 UCLASS()
 class ACTIONROGUELIKE_API URogueAttributeSetTemplate : public UDataAsset
