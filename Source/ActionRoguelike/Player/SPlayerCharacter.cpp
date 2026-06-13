@@ -144,6 +144,8 @@ void ASPlayerCharacter::Die()
 	PlayAnimMontage(DeathMontage);
 	GetMesh()->SetSimulatePhysics(false);
 	
+	ActionSystemComp->RemoveAttributeSetChangedCallback(this);
+	
 	if (ARoguePlayerController* PC = Cast<ARoguePlayerController>(GetController()))
 	{
 		PC->HandlePlayerDeath();
