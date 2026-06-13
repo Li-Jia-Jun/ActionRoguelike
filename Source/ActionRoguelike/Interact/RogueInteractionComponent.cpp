@@ -16,6 +16,11 @@ URogueInteractionComponent::URogueInteractionComponent()
 
 void URogueInteractionComponent::Interact()
 {
+	if (!bIsInteractionEnabled)
+	{
+		return;
+	}
+	
 	if (SelectedActor != nullptr)
 	{
 		IRogueInteractionInterface::Execute_Interact(SelectedActor);
@@ -24,12 +29,17 @@ void URogueInteractionComponent::Interact()
 
 void URogueInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	if (!bIsInteractionEnabled)
+	{
+		return;
+	}
+	
 	bool bDebugDrawEnable = CVarInteractionDebugDrawing.GetValueOnGameThread(); 
 	
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	
 	APlayerController* PC = CastChecked<APlayerController>(GetOwner());
-
+	
 	FVector SelfLocation = PC->GetPawn()->GetActorLocation();
 	
 	FVector CameraLocation = PC->PlayerCameraManager->GetCameraLocation();

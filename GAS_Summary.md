@@ -35,6 +35,8 @@ Recalculation order every time anything changes:
 
 The initial values come from a `URogueAttributeSetTemplate` data asset assigned on the ASC.
 
+`URogueAttributeSet` should only be changed by ASC for event broadcasting.
+
 ---
 
 ## 2. Gameplay Effects

@@ -22,6 +22,8 @@ public:
 	ARoguePlayerController();
 	
 	void StartInteract();
+	
+	void HandlePlayerDeath();
 
 protected:
 
@@ -29,6 +31,8 @@ protected:
 	TObjectPtr<UInputAction> Input_Interact;
 
 	virtual void SetupInputComponent() override;
+	
+	bool bIsCharacterDead;
 
 private:
 	TObjectPtr<URogueInteractionComponent> InteractionComponent;

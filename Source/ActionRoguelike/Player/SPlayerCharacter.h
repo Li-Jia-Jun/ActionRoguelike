@@ -110,5 +110,9 @@ protected:
 	
 	void SpecialAttack(const FInputActionValue& InValue);
 	
+	void Die();
+	
 	void OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnapshot, FRogueAttributeSetSnapshot NewSnapshot);
+	
+	bool bIsDead = false;
 };

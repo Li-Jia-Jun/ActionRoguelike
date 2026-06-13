@@ -2,11 +2,13 @@
 
 
 #include "SPlayerCharacter.h"
+#include "RoguePlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "RogueSharedGameplayTags.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 
@@ -135,6 +137,19 @@ void ASPlayerCharacter::SpecialAttack(const FInputActionValue& InValue)
 	ActionSystemComp->TryActivateAbilityByTag(SpecialAttackAbilitySpec.AbilityTag, OutAbility);
 }
 
+void ASPlayerCharacter::Die()
+{
+	bIsDead = true;
+	
+	PlayAnimMontage(DeathMontage);
+	GetMesh()->SetSimulatePhysics(false);
+	
+	if (ARoguePlayerController* PC = Cast<ARoguePlayerController>(GetController()))
+	{
+		PC->HandlePlayerDeath();
+	}
+}
+
 void ASPlayerCharacter::OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnapshot, FRogueAttributeSetSnapshot NewSnapshot)
 {
 	// Update movement speed
@@ -146,6 +161,14 @@ void ASPlayerCharacter::OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnap
 	if (!FMath::IsNearlyEqual(OldSpeedScale, NewSpeedScale))
 	{
 		GetCharacterMovement()->MaxWalkSpeed = OriginalMovementMaxSpeed * NewSpeedScale;
+	}
+	
+	// Death
+	FAttributeNumericData CurrentHealthAttribute;
+	UAttributeSetFunctionLibrary::FindAttributeDataByTag(NewSnapshot.Attributes, RogueSharedGameplayTags::Attribute_CurrentHealth, CurrentHealthAttribute);
+	if (FMath::IsNearlyZero(CurrentHealthAttribute.CurrentValue))
+	{
+		Die();
 	}
 }
 

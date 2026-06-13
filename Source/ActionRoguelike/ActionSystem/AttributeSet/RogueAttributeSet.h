@@ -32,8 +32,11 @@ struct FAttributeNumericData
 	FGameplayTag Tag;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
+	float MinValue = 0.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
 	float BaseValue;
-	
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
 	float CurrentValue;
 	

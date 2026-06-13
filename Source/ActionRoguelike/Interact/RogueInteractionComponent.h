@@ -16,6 +16,11 @@ public:
 	URogueInteractionComponent();
 
 	void Interact();
+	
+	void DisableInteraction()
+	{
+		bIsInteractionEnabled = false;
+	};
 
 protected:
 	UPROPERTY(VisibleAnywhere, Category = "Interaction")
@@ -29,6 +34,8 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category = "Interaction")
 	TObjectPtr<AActor> SelectedActor;
+	
+	bool bIsInteractionEnabled = true;
 
 public:	
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

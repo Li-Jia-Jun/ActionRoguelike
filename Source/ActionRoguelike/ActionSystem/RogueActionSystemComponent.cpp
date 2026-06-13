@@ -268,7 +268,13 @@ bool URogueActionSystemComponent::IsAbilityActiveByTag(FGameplayTag AbilityTag) 
 
 bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const
 {
-	FString FailMessage = FString::Printf(TEXT("%s Cannot cannot apply %s from %s: "), 
+	if (GameplayEffect == nullptr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Empty gameplay effect from %s"), *Sender->GetName());
+		return false;
+	}
+	
+	FString FailMessage = FString::Printf(TEXT("%s cannot apply %s from %s: "), 
 			*GetOwner()->GetName(), *Sender->GetName(), *GameplayEffect->GetName());
 	
 	// Tag check
@@ -304,6 +310,12 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, const UObject* Sender, 
 	bool ForceApply, URogueGameplayEffectInstance*& OutInstance)
 {
+	if (GameplayEffect == nullptr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Empty gameplay effect from %s"), *Sender->GetName());
+		return false;
+	}
+	
 	if (!ForceApply and !CanApplyGameplayEffect(GameplayEffect, this))
 	{
 		return false;

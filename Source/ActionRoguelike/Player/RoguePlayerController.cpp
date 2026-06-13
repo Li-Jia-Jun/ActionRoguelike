@@ -12,6 +12,9 @@ ARoguePlayerController::ARoguePlayerController()
 
 void ARoguePlayerController::StartInteract()
 {
+	if (bIsCharacterDead)
+		return;
+	
 	if (!GetPawn()->InputEnabled())
 		return;
 	
@@ -24,4 +27,17 @@ void ARoguePlayerController::SetupInputComponent()
 
 	UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(InputComponent);
 	EnhancedInput->BindAction(Input_Interact, ETriggerEvent::Triggered, this, &ARoguePlayerController::StartInteract);
+}
+
+void ARoguePlayerController::HandlePlayerDeath()
+{
+	bIsCharacterDead = true;
+	
+	InteractionComponent->DisableInteraction();
+	
+	UnPossess();
+	ChangeState(NAME_Spectating);
+
+	// Ensure the client synchronizes the state change.
+	// ClientGotoState(NAME_Spectating);
 }

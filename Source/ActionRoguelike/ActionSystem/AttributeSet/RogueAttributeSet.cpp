@@ -97,6 +97,7 @@ void URogueAttributeSet::ApplyModifiers(const TArray<FRogueGameplayEffectModifie
 			if (Modifier.TargetAttribute.MatchesTag(Attribute.Tag))
 			{
 				ApplyModifierToAttribute<&FAttributeNumericData::BaseValue>(Modifier, Attribute);
+				Attribute.BaseValue = FMath::Max(Attribute.BaseValue, Attribute.MinValue);
 				break;
 			}
 		}
@@ -164,11 +165,17 @@ void URogueAttributeSet::RecalculateAttributes()
 	for (const FRogueAttributeRelationship Relationship : AttributeRelationships)
 	{
 		auto Attribute01 = Attributes.FindByPredicate([Relationship](auto Attr) {return Attr.Tag.MatchesTag(Relationship.Attribute01);});
-		auto Attribute02 = Attributes.FindByPredicate([Relationship](auto Attr) {return Attr.Tag.MatchesTag(Relationship.Attribute02);});	
+		auto Attribute02 = Attributes.FindByPredicate([Relationship](auto Attr) {return Attr.Tag.MatchesTag(Relationship.Attribute02);});
 		if (Attribute01 && Attribute02)
 		{
 			ApplyRelationshipsToAttribute(Relationship, *Attribute01, *Attribute02);
 		}
+	}
+
+	// 4. Clamp current values to their minimums
+	for (auto& AttributeItem : Attributes)
+	{
+		AttributeItem.CurrentValue = FMath::Max(AttributeItem.CurrentValue, AttributeItem.MinValue);
 	}
 }
 
