@@ -59,6 +59,11 @@ bool URogueAttributeSet::CanAffordModifiers(const TArray<FRogueGameplayEffectMod
 	// Check if relationships are still valid
 	for (const FRogueAttributeRelationship Relationship : AttributeRelationships)
 	{
+		if (!Relationship.bIsAffordableTest)
+		{
+			continue;
+		}
+		
 		auto Attribute01 = AttributesCopy.FindByPredicate([Relationship](auto Attr) {return Attr.Tag.MatchesTag(Relationship.Attribute01);});
 		auto Attribute02 = AttributesCopy.FindByPredicate([Relationship](auto Attr) {return Attr.Tag.MatchesTag(Relationship.Attribute02);});	
 		if (Attribute01 && Attribute02)

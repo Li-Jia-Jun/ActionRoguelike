@@ -4,6 +4,48 @@ This project implements a custom Gameplay Ability System (GAS) — not Unreal's 
 
 ---
 
+## Overview
+
+**What is a Gameplay Ability System?** It's the standard architecture in modern action/RPG games for answering three questions: *what can a character do* (abilities), *what numbers describe a character* (attributes like health, mana, damage), and *what changes those numbers over time* (effects like damage, heals, buffs, and debuffs). Rather than scattering this logic across individual character classes — where a fireball would directly reach into a target and subtract health — a GAS centralizes it into one component that every character owns. Each character has an **Ability System Component (ASC)** that holds their attributes and runs their abilities and effects, so all gameplay interactions flow through a single, consistent place.
+
+The core idea is **decoupling through data**. An ability (a fireball) doesn't know anything about its target's internals; it just applies a **Gameplay Effect** (a data-defined "deal 20 fire damage and apply burn"). The effect doesn't know who fired it; it just describes a change to attributes. Attributes don't know what's modifying them; they just recalculate from a base value plus whatever modifiers are currently active. **Gameplay Tags** — hierarchical labels like `Status.Burn` or `State.Casting` — glue these pieces together loosely, letting one system ask "is this character burning?" without holding a hard reference to whatever caused it. The payoff is that designers can author new abilities and effects as data assets, mix and match them, and the engine handles applying, stacking, timing, and cleaning them up uniformly.
+
+Unreal ships with its own production-grade GAS, but it's large and notoriously hard to learn. This project reimplements the same core concepts — ASC, attributes, effects, abilities, tags — as a smaller, self-contained system, both to learn how those pieces fit together and to make deliberate, different design choices along the way (documented below).
+
+![Potions](/docs/images/Potions.png)
+
+## Design Rationale & Tradeoffs
+
+This system was built primarily as a way to learn Unreal and to understand the design decisions inside Epic's GAS — not to claim it improves on it. The most useful part of the exercise was rebuilding the core loop from scratch and feeling where the tradeoffs actually live. The notes below capture the places where this implementation diverges from stock GAS and why, since the reasoning is more interesting than the code itself.
+
+### UDataAsset vs. DataTable for the AttributeSet
+
+Epic's GAS typically drives attribute initialization from a **DataTable** — a row-based, spreadsheet-style structure where every attribute is a row sharing one row struct, referenced through an `FDataTableRowHandle`. That's a good fit when you have hundreds of attributes to bulk-tune like a spreadsheet.
+
+This project instead uses a **`UDataAsset`** (`URogueAttributeSetTemplate`) to define the starting attributes. The motivation was strong typing, direct object references instead of row handles, and proper UObject inheritance — a template can derive from another template and specialize it. The tradeoff is real and worth stating plainly: DataAssets are less convenient for bulk editing, since you're editing individual assets rather than scanning a single table. For a project of this scale, the type safety and inheritance were worth more than spreadsheet-style editing, but the calculus would flip on a project with a very large, frequently-retuned attribute list.
+
+![Player AttributeSet](/docs/images/PlayerAttributeSet.png)
+
+### Unified Tag Map, Separated Ownership
+
+Stock GAS keeps GE-granted tags inside the replicated `FActiveGameplayEffectsContainer` and ability-owned tags as loose tags, but unifies them for queries through a single `FGameplayTagCountContainer`. This implementation follows the same principle deliberately: a single `ActiveTagCountMap` answers every `HasTag`-style query regardless of source, while ownership and cleanup responsibility stay separated per system (`FDebuffHandle` for effects, direct decrement for abilities). Arriving at this split independently and then finding Epic does essentially the same thing was a useful confirmation that the separation of *query surface* from *ownership* is a sound instinct, not an accident of their codebase.
+
+*(Screenshot placeholder: ActiveTagCountMap state during an active burn + cast.)*
+
+### Handle-Based Identity for Debuffs
+
+An earlier version of `FAttributeDebuffData` cached the index of the granting effect instance so the effect could find its own debuff to remove on finish. That was fragile — container reordering or removal could shift indices out from under the reference. The refactor to `FDebuffHandle` decouples *semantic identity* (the tag, e.g. `Status.Burn`, used for queries and UI) from *ownership identity* (a unique handle the granter stores and removes by). This mirrors Epic's `FActiveGameplayEffectHandle`, and it cleanly resolves the case where two different effects grant the same tag with different modifiers. The evolution from cached-index to handle is itself a good illustration of understanding *why* the more robust design is necessary, rather than reaching for it by default.
+
+### Deliberately Out of Scope
+
+Some of stock GAS's complexity was intentionally left out to keep the focus on the core attribute / effect / ability loop:
+
+- **Prediction** — Epic's client-side prediction system is a significant part of why GAS is complex; this implementation is authoritative-only.
+- **Full replication** — loose-style tags here don't auto-replicate the way Epic's replicated effect container does. Replicating the active-effect/tag state the way `FActiveGameplayEffectsContainer` does would be the natural next step, and it's also where most of the genuine difficulty lives.
+
+Scoping these out was a choice to understand the fundamentals first, with a clear sense of what the harder, networked version would require.
+
+
 ## Components at a Glance
 
 | Component | File | Role |
@@ -16,6 +58,7 @@ This project implements a custom Gameplay Ability System (GAS) — not Unreal's 
 | Duration Policy Instances | `ActionSystem/GameplayEffect/RogueGameplayEffectDurationPolicy` | Manage timing (instant / timed / periodic) |
 
 ---
+
 
 ## 1. Attribute System
 
@@ -266,3 +309,7 @@ OnAnimMontageFinished → EndAbility()
 - **Separation of template vs. instance** — `URogueGameplayEffect` (data) vs. `URogueGameplayEffectInstance` (runtime) keeps config clean and runtime state isolated.
 - **Unified tag query, separated ownership** — GE debuff tags and GA execution tags both write to a single `ActiveTagCountMap` on the ASC for uniform querying, but each system tracks ownership separately (`FDebuffHandle` for GE, direct decrement for GA) to guarantee clean cleanup at `Finish()` and `EndAbility()`.
 - **Handle-based debuff ownership** — `FDebuffHandle` (unique int32 per grant) decouples tag identity (`Status.Burn` = "what condition") from ownership ("whose burn"), allowing multiple sources to grant the same tag with independent modifiers and unambiguous removal.
+
+---
+
+

@@ -7,13 +7,13 @@
 /*
  * Class to store data that modifies attributes for Gameplay Effect.
  */
-USTRUCT(BlueprintType)
+USTRUCT(BlueprintType, meta=(Hidden))
 struct FRougeGameplayEffectModifyPolicy
 {
 	GENERATED_BODY()
 };
 
-USTRUCT(BlueprintType)
+USTRUCT(BlueprintType, DisplayName="Permanent Modify")
 struct FRogueGameplayEffectPermanentModify: public FRougeGameplayEffectModifyPolicy
 {
 	GENERATED_BODY()
@@ -28,7 +28,7 @@ struct FRogueGameplayEffectPermanentModify: public FRougeGameplayEffectModifyPol
 	TArray<FGameplayTag> EffectsToCure;
 };
 
-USTRUCT(BlueprintType)
+USTRUCT(BlueprintType, DisplayName="Debuff Modify")
 struct FRogueGameplayEffectDebuffModify : public FRougeGameplayEffectModifyPolicy
 {
 	GENERATED_BODY()

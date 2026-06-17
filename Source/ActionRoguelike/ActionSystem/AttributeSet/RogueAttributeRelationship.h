@@ -33,6 +33,9 @@ struct ACTIONROGUELIKE_API FRogueAttributeRelationship
 	UPROPERTY(EditDefaultsOnly)
 	FGameplayTag Attribute02;
 	
+	UPROPERTY(EditDefaultsOnly, meta=(ToolTip = "If true, this relationship will used for affordability test."))
+	bool bIsAffordableTest = false;
+	
 	FRogueAttributeRelationship()
 	{
 		eRelation = EAttributeSetRelation::eNotGreaterThan;

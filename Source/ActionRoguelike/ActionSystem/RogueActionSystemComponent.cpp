@@ -338,7 +338,7 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 		// Remove the last instance
 		for (URogueGameplayEffectInstance* ExistingInstance : GameplayEffectInstances)
 		{
-			if (ExistingInstance->Template->EffectTag.MatchesTag(EffectInstance->Template->EffectTag))
+			if (ExistingInstance->Template->EffectTag.MatchesTag(GameplayEffect->EffectTag))
 			{
 				GameplayEffectInstances.Remove(ExistingInstance);
 				ExistingInstance->OnFinishedDelegate.RemoveAll(this);

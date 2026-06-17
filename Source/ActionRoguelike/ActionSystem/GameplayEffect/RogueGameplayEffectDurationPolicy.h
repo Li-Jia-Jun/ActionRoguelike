@@ -8,7 +8,7 @@
 
 // Data
 
-USTRUCT(BlueprintType, meta=(HiddenByDefault))
+USTRUCT(BlueprintType, meta=(Hidden))
 struct FRogueGameplayEffectDurationPolicy
 {
 	GENERATED_BODY()

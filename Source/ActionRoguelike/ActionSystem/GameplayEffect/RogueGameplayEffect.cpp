@@ -10,8 +10,9 @@ EDataValidationResult URogueGameplayEffect::IsDataValid(FDataValidationContext& 
 	// Debuff modify can only apply to duration policy
 	if (ModifyPolicy.GetScriptStruct() == FRogueGameplayEffectDebuffModify::StaticStruct())
 	{
-		if (DurationPolicy.GetScriptStruct() != FRogueGameplayEffectInstantApply::StaticStruct())
+		if (DurationPolicy.GetScriptStruct() != FRogueGameplayEffectDurationApply::StaticStruct())
 		{
+			UE_LOG(LogTemp, Error, TEXT("Debuff modify can only apply to duration policy."));
 			return EDataValidationResult::Invalid;
 		}
 	}
