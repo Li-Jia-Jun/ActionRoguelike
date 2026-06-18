@@ -12,7 +12,7 @@ The core idea is **decoupling through data**. An ability (a fireball) doesn't kn
 
 Unreal ships with its own production-grade GAS, but it's large and notoriously hard to learn. This project reimplements the same core concepts — ASC, attributes, effects, abilities, tags — as a smaller, self-contained system, both to learn how those pieces fit together and to make deliberate, different design choices along the way (documented below).
 
-![Potions](/docs/images/Potions.png)
+![Potions](./docs/images/Potions.png)
 
 ## Design Rationale & Tradeoffs
 
@@ -24,7 +24,7 @@ Epic's GAS typically drives attribute initialization from a **DataTable** — a 
 
 This project instead uses a **`UDataAsset`** (`URogueAttributeSetTemplate`) to define the starting attributes. The motivation was strong typing, direct object references instead of row handles, and proper UObject inheritance — a template can derive from another template and specialize it. The tradeoff is real and worth stating plainly: DataAssets are less convenient for bulk editing, since you're editing individual assets rather than scanning a single table. For a project of this scale, the type safety and inheritance were worth more than spreadsheet-style editing, but the calculus would flip on a project with a very large, frequently-retuned attribute list.
 
-![Player AttributeSet](/docs/images/PlayerAttributeSet.png)
+![Player AttributeSet](./docs/images/PlayerAttributeSet.png)
 
 ### Unified Tag Map, Separated Ownership
 
