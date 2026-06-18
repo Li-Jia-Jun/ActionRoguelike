@@ -15,6 +15,9 @@ Unreal ships with its own production-grade GAS, but it's large and notoriously h
 ![Potions](./Docs/Images/Potions.png)
 (Potions are effectively represented by GE: health recover by 10, restore full health, temporary boost max health to 110%, posion that reduces health every 1 second and reduce speed to 75%)
 
+![Minion](./Docs/Images/Minion.png)
+(EnemyAI can also uses ASC)
+
 ## Design Rationale & Tradeoffs
 
 This system was built primarily as a way to learn Unreal and to understand the design decisions inside Epic's GAS — not to claim it improves on it. The most useful part of the exercise was rebuilding the core loop from scratch and feeling where the tradeoffs actually live. The notes below capture the places where this implementation diverges from stock GAS and why, since the reasoning is more interesting than the code itself.
