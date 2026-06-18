@@ -139,7 +139,7 @@ void UAbility_CastProjectile::CastProjectile()
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	SpawnParams.Instigator = OwnerCharacter.Get();
 
-	World->SpawnActor<AActor>(ProjectileClass, SpawnLocation, AdjustedSpawnRotation, SpawnParams);
+	auto Actor = World->SpawnActor<AActor>(ProjectileClass, SpawnLocation, AdjustedSpawnRotation, SpawnParams);
 	
 	// Debug draw
 	float DebugDrawDuration = CVarProjectileDebugDrawing.GetValueOnGameThread();

@@ -20,4 +20,7 @@ struct ACTIONROGUELIKE_API FRogueGameplayEventData
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gameplay Event")
 	float Value = 0.0f;
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gameplay Event")
+	FVector VectorValue = FVector::ZeroVector;
 };

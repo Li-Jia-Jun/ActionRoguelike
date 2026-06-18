@@ -33,7 +33,7 @@ public:
 	virtual void PostInitializeComponents() override;
 	
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
-
+	
 	virtual void BeginPlay() override;
 	
 	// IAbilityAttackInfoProvider
@@ -114,5 +114,12 @@ protected:
 	
 	void OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnapshot, FRogueAttributeSetSnapshot NewSnapshot);
 	
+	UFUNCTION()
+	void OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload);
+	
 	bool bIsDead = false;
+	
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> HitOverlayMID;
+	FTimerHandle OverlayTimerHandle;
 };

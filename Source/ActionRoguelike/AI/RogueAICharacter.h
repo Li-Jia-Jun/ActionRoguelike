@@ -18,16 +18,22 @@ class ACTIONROGUELIKE_API ARogueAICharacter : public ACharacter
 	GENERATED_BODY()
 
 public:
-	// Sets default values for this character's properties
 	ARogueAICharacter();
+	
+	virtual void BeginPlay() override;
 
 protected:
-	// Called when the game starts or when spawned
-	virtual void BeginPlay() override;
+	
+	UFUNCTION()
+	void OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload);
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Action System")
 	URogueActionSystemComponent* ActionSystemComp;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UI")
 	URogueAttributeBarWidgetComponent* HealthAttributeBarWidgetComp;
+	
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> HitOverlayMID;
+	FTimerHandle OverlayTimerHandle;
 };

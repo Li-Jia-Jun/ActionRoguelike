@@ -4,6 +4,7 @@
 #include "RogueAICharacter.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "UI/RogueAttributeBarWidgetComponent.h"
+#include "RogueSharedGameplayTags.h"
 
 
 // Sets default values
@@ -24,6 +25,29 @@ ARogueAICharacter::ARogueAICharacter()
 void ARogueAICharacter::BeginPlay()
 {
 	Super::BeginPlay();
+	
+	ActionSystemComp->GameplayEventReceivedDelegate.AddDynamic(this, &ThisClass::OnHit);
+	
+	// Setup overlay effect
+	HitOverlayMID = UMaterialInstanceDynamic::Create(GetMesh()->GetOverlayMaterial(), this);
+	GetMesh()->SetOverlayMaterial(HitOverlayMID);
+	GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
+}
+
+void ARogueAICharacter::OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload)
+{
+	if (!EventTag.MatchesTag(RogueSharedGameplayTags::Event_OnHit))
+	{
+		return;
+	}
+	
+	GetMesh()->SetOverlayMaterialMaxDrawDistance(0);
+	HitOverlayMID->SetScalarParameterValue(FName("HitTime"), GetWorld()->TimeSeconds);
+
+	GetWorldTimerManager().SetTimer(OverlayTimerHandle, [this]()
+	{
+		GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
+	}, 1.0f, false);
 }
 
 

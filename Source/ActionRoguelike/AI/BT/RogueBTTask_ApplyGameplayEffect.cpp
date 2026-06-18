@@ -13,6 +13,8 @@
 EBTNodeResult::Type URogueBTTask_ApplyGameplayEffect::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
 	MyOwnerComp = &OwnerComp;
+
+	check(GameplayEffect);
 	
 	ACharacter* ThisCharacter = Cast<ACharacter>(OwnerComp.GetAIOwner()->GetPawn());
 	check(ThisCharacter);

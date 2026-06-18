@@ -76,6 +76,14 @@ void ASPlayerCharacter::BeginPlay()
 	// Apply initial speed scale
 	OriginalMovementMaxSpeed = GetCharacterMovement()->MaxWalkSpeed;
 	GetCharacterMovement()->MaxWalkSpeed = OriginalMovementMaxSpeed * SpeedAttribute.CurrentValue;
+	
+	// Player character binds OnHit event
+	ActionSystemComp->GameplayEventReceivedDelegate.AddDynamic(this, &ThisClass::OnHit);
+	
+	// Overlap setup
+	HitOverlayMID = UMaterialInstanceDynamic::Create(GetMesh()->GetOverlayMaterial(), this);
+	GetMesh()->SetOverlayMaterial(HitOverlayMID);
+	GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
 }
 
 void ASPlayerCharacter::Move(const FInputActionValue& InValue)
@@ -172,6 +180,23 @@ void ASPlayerCharacter::OnAttributeSetChanged(FRogueAttributeSetSnapshot OldSnap
 	{
 		Die();
 	}
+}
+
+void ASPlayerCharacter::OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload)
+{
+	if (!EventTag.MatchesTag(RogueSharedGameplayTags::Event_OnHit))
+	{
+		return;
+	}
+	
+	// Turn on overlay effect (0 means always draw)
+	GetMesh()->SetOverlayMaterialMaxDrawDistance(0);
+	HitOverlayMID->SetScalarParameterValue(FName("HitTime"), GetWorld()->TimeSeconds);
+
+	GetWorldTimerManager().SetTimer(OverlayTimerHandle, [this]()
+	{
+		GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
+	}, 1.0f, false);
 }
 
 // IAbilityAttackInfoProvider
