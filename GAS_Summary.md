@@ -6,13 +6,14 @@ This project implements a custom Gameplay Ability System (GAS) — not Unreal's 
 
 ## Overview
 
-**What is a Gameplay Ability System?** It's the standard architecture in modern action/RPG games for answering three questions: *what can a character do* (abilities), *what numbers describe a character* (attributes like health, mana, damage), and *what changes those numbers over time* (effects like damage, heals, buffs, and debuffs). Rather than scattering this logic across individual character classes — where a fireball would directly reach into a target and subtract health — a GAS centralizes it into one component that every character owns. Each character has an **Ability System Component (ASC)** that holds their attributes and runs their abilities and effects, so all gameplay interactions flow through a single, consistent place.
+**What is a Gameplay Ability System?** It's the standard architecture in modern action/RPG games for answering three questions: *what can a character do* (abilities), *what numbers describe a character* (attributes like health, mana, damage, speed), and *what changes those numbers over time* (effects like damage, heals, buffs, and debuffs). Rather than scattering this logic across individual character classes, GAS centralizes them into one component that every character owns. Each character has an **Ability System Component (ASC)** that holds their attributes and runs their abilities and effects, so all gameplay interactions flow through a single, consistent place.
 
-The core idea is **decoupling through data**. An ability (a fireball) doesn't know anything about its target's internals; it just applies a **Gameplay Effect** (a data-defined "deal 20 fire damage and apply burn"). The effect doesn't know who fired it; it just describes a change to attributes. Attributes don't know what's modifying them; they just recalculate from a base value plus whatever modifiers are currently active. **Gameplay Tags** — hierarchical labels like `Status.Burn` or `State.Casting` — glue these pieces together loosely, letting one system ask "is this character burning?" without holding a hard reference to whatever caused it. The payoff is that designers can author new abilities and effects as data assets, mix and match them, and the engine handles applying, stacking, timing, and cleaning them up uniformly.
+The core idea is **decoupling through data**. An **Gameplay Ability (GA)** (a fireball) doesn't know anything about its target's internals; it just applies a **Gameplay Effect (GE)** (a data-defined "deal 20 fire damage and apply burn"). The effect doesn't know who fired it; it just describes a change to attributes. Attributes don't know what's modifying them; they just recalculate from a base value plus whatever modifiers are currently active. **Gameplay Tags** — hierarchical labels like `Status.Burn` or `State.Casting` — glue these pieces together loosely, letting one system ask "is this character burning?" without holding a hard reference to whatever caused it. The payoff is that designers can author new abilities and effects as data assets, mix and match them, and the engine handles applying, stacking, timing, and cleaning them up uniformly.
 
 Unreal ships with its own production-grade GAS, but it's large and notoriously hard to learn. This project reimplements the same core concepts — ASC, attributes, effects, abilities, tags — as a smaller, self-contained system, both to learn how those pieces fit together and to make deliberate, different design choices along the way (documented below).
 
-![Potions](./docs/images/Potions.png)
+![Potions](./Docs/Images/Potions.png)
+(Potions are effectively represented by GE: health recover by 10, restore full health, temporary boost max health to 110%, posion that reduces health every 1 second and reduce speed to 75%)
 
 ## Design Rationale & Tradeoffs
 
@@ -24,7 +25,8 @@ Epic's GAS typically drives attribute initialization from a **DataTable** — a 
 
 This project instead uses a **`UDataAsset`** (`URogueAttributeSetTemplate`) to define the starting attributes. The motivation was strong typing, direct object references instead of row handles, and proper UObject inheritance — a template can derive from another template and specialize it. The tradeoff is real and worth stating plainly: DataAssets are less convenient for bulk editing, since you're editing individual assets rather than scanning a single table. For a project of this scale, the type safety and inheritance were worth more than spreadsheet-style editing, but the calculus would flip on a project with a very large, frequently-retuned attribute list.
 
-![Player AttributeSet](./docs/images/PlayerAttributeSet.png)
+![Player AttributeSet](./Docs/Images/PlayerAttributeSet.png)
+(Define player attribute by just setting values in a list)
 
 ### Unified Tag Map, Separated Ownership
 
