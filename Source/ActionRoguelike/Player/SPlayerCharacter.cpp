@@ -12,7 +12,6 @@
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 
-
 ASPlayerCharacter::ASPlayerCharacter()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -61,7 +60,12 @@ void ASPlayerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 	
-	// Grant default abilities
+	// Grant inborn abilities
+	for (TSubclassOf<URogueGameplayAbility> AbilityCls : InbornAbilities)
+	{
+		FRogueGameplayAbilitySpec TempSpec;
+		ActionSystemComp->GrantGameplayAbility(AbilityCls, TempSpec);
+	}
 	ActionSystemComp->GrantGameplayAbility(PrimaryAttackAbilityCls, PrimaryAttackAbilitySpec);
 	ActionSystemComp->GrantGameplayAbility(SecondaryAttackAbilityCls, SecondaryAttackAbilitySpec);
 	ActionSystemComp->GrantGameplayAbility(SpecialAttackAbilityCls, SpecialAttackAbilitySpec);

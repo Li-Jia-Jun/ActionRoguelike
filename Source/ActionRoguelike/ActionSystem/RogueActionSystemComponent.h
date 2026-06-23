@@ -26,7 +26,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(
 	);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
-	FGameplayEffectChangedSignature, const TArray<FGameplayTag>&, OldTags, const TArray<FGameplayTag>&, NewTags
+	FGameplayEffectChangedSignature, const FGameplayTagContainer&, OldTags, const FGameplayTagContainer&, NewTags
 	);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
@@ -46,20 +46,40 @@ public:
 	
 	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
 	
+	UFUNCTION(BlueprintCallable)
 	void GrantActiveTag(const FGameplayTag Tag);
 	
+	UFUNCTION(BlueprintCallable)
 	bool RemoveActiveTag(const FGameplayTag Tag);
 	
-	bool HasActiveTag(const FGameplayTag Tag) const;
+	UFUNCTION(BlueprintCallable)
+	bool IsTagActive(const FGameplayTag Tag) const;
 	
+	UFUNCTION(BlueprintCallable)
+	void GrantBlockTag(const FGameplayTag Tag);
+	
+	UFUNCTION(BlueprintCallable)
+	bool RemoveBlockTag(const FGameplayTag Tag);
+	
+	UFUNCTION()
+	bool IsTagBlocked(const FGameplayTag Tag) const;
+	
+	UFUNCTION(BlueprintCallable)
 	bool GrantGameplayAbility(TSubclassOf<URogueGameplayAbility> GameplayAbilityCls, FRogueGameplayAbilitySpec& OutAbilitySpec);
 	
+	UFUNCTION(BlueprintCallable)
 	bool TryActivateAbilityByTag(FGameplayTag AbilityTag, URogueGameplayAbility*& OutAbility);
 	
+	UFUNCTION(BlueprintCallable)
 	bool StopAbilityByTag(FGameplayTag AbilityTag);
 	
+	UFUNCTION(BlueprintCallable)
+	FGameplayTagContainer GetActiveAbilityTags() const;
+	
+	UFUNCTION(BlueprintCallable)
 	bool CanApplyGameplayEffect(const URogueGameplayEffect* GameplayEffect, const UObject* Sender) const;
 	
+	UFUNCTION(BlueprintCallable)
 	bool ApplyGameplayEffectToSelf(const URogueGameplayEffect* GameplayEffect, 
 		const UObject* Sender, bool ForceApply, URogueGameplayEffectInstance*& OutInstance);
 	
@@ -68,7 +88,7 @@ public:
 	FRogueAttributeSetSnapshot TakeAttributeSnapshot() const;
 	
 	UFUNCTION(BlueprintCallable)
-	TArray<FGameplayTag> GetActiveGameplayEffectTags() const;
+	FGameplayTagContainer GetActiveGameplayEffectTags() const;
 
 	UFUNCTION(BlueprintCallable)
 	void HandleGameplayEvent(FGameplayTag EventTag, const FRogueGameplayEventData& Payload);
@@ -107,14 +127,25 @@ protected:
 	UFUNCTION()
 	void OnActiveGameplayEffectFinished(URogueGameplayEffectInstance* InGameplayEffectInstance);
 	
-	TArray<FGameplayTag> GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& GameplayEffectInstances);
+	FGameplayTagContainer GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& GameplayEffectInstances) const;
 	
 	// Gameplay Tags
 	
 	// Active tags and their counts. Multiple data sources:
-	// - GA granted tags 
-	// - GE debuff tags
-	TMap<FGameplayTag, int> ActiveTagCountMap;
+	// - GA TagsToGrant
+	// - GA AbilityTag
+	// - GE TagsToGrant
+	// - GE Debuff Tag
+	// To find tags for active GA or GE, call GetActiveAbilityTags() or GetActiveGameplayEffectTags()
+	UPROPERTY(VisibleAnywhere, Category="Rogue Gameplay Tags",
+		meta=(ToolTip = "Tags that are currently active and their counts."))
+	TMap<FGameplayTag, int32> ActiveTagCountMap;
+	
+	// Tags that are being blocked and their counts. Multiple data sources:
+	// - GE TagsThisBlock
+	UPROPERTY(VisibleAnywhere, Category="Rogue Gameplay Tags",
+		meta=(ToolTip = "Tags that are being blocked and their counts."))
+	TMap<FGameplayTag, int32> BlockedTagCountMap;
 	
 	// Gameplay Ability
 	
@@ -125,13 +156,13 @@ protected:
 	UFUNCTION()
 	void OnAbilityEnded(URogueGameplayAbility* Ability, const FRogueGameplayAbilityEndedData& EndedData);
 	
-	UFUNCTION(BlueprintCallable, Category="GameplayAbility")
+	UFUNCTION(BlueprintCallable, Category="Rogue Gameplay Ability")
 	bool IsAbilityActiveByTag(FGameplayTag AbilityTag) const;
 	
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="GameplayAbility")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Rogue Gameplay Ability")
 	TArray<FRogueGameplayAbilitySpec> GrantedAbilitySpecs;
 	
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="GameplayAbility")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Rogue Gameplay Ability")
 	TArray<TObjectPtr<URogueGameplayAbility>> ActiveAbilities;
 	
 	// Gameplay Effect
@@ -139,7 +170,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly)
 	TArray<TObjectPtr<URogueGameplayEffect>> StartupGameplayEffects;
 	
-	UPROPERTY(VisibleAnywhere, Category="GameplayEffect")
+	UPROPERTY(VisibleAnywhere, Category="Rogue Gameplay Effect")
 	TArray<TObjectPtr<URogueGameplayEffectInstance>> GameplayEffectInstances;
 	
 	friend class URogueGameplayEffectInstance;
@@ -148,9 +179,9 @@ protected:
 	
 	void BroadcastAttributeSetChanged(const FRogueAttributeSetSnapshot& OldSnapshot, const FRogueAttributeSetSnapshot& NewSnapshot) const;
 	
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AttributeSet")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Rogue AttributeSet")
 	TObjectPtr<URogueAttributeSet> AttributeSet;
 	
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AttributeSet")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Rogue AttributeSet")
 	TObjectPtr<URogueAttributeSetTemplate> AttributeSetTemplate;
 };

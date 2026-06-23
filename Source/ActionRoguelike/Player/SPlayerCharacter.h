@@ -42,6 +42,9 @@ public:
 
 protected:
 	
+	UPROPERTY(EditDefaultsOnly, Category = "Ability")
+	TArray<TSubclassOf<URogueGameplayAbility>> InbornAbilities;
+	
 	UPROPERTY(EditDefaultsOnly, Category = "Attack")
 	TSubclassOf<URogueGameplayAbility> PrimaryAttackAbilityCls;
 	FRogueGameplayAbilitySpec PrimaryAttackAbilitySpec; 

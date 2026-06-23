@@ -47,13 +47,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
 	uint8 StackLimit;
 	
+	UPROPERTY(EditDefaultsOnly, Category= "Rogue Gameplay Effect")
+	FGameplayTagContainer TagsToGrant;
+	
+	UPROPERTY(EditDefaultsOnly, Category= "Rogue Gameplay Effect",
+		meta=(ToolTip = "Tags that this effect blocks"))
+	FGameplayTagContainer TagsThisBlock;
+	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect", 
-		meta = (ToolTips = "Tags that block this effect from apply"))
+		meta = (ToolTip = "Tags that block this effect from apply"))
 	FGameplayTagContainer TagsThatBlock;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect",
-		meta = (ToolTips = "Tags that are present before this effect can apply"))
-	FGameplayTagContainer TagsThatRequire;// PreconditionTags
+		meta = (ToolTip = "Tags that are present before this effect can apply"))
+	FGameplayTagContainer TagsThatRequire;
 	
 #if WITH_EDITOR
 	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;

@@ -1,7 +1,7 @@
 ﻿// Fill out your copyright notice in the Description page of Project Settings.
 
-
 #include "RogueActionSystemComponent.h"
+#include "RogueLog.h"
 #include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 #include "ActionSystem/GameplayAbility/FRogueGameplayAbilityEndedData.h"
@@ -35,6 +35,8 @@ void URogueActionSystemComponent::BeginPlay()
 	{
 		URogueGameplayEffectInstance* TempInstance = nullptr;
 		ApplyGameplayEffectToSelf(Effect, this, true, TempInstance);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Startup GE applied: %s."), 
+			*GetOwner()->GetName(), *Effect->GetName());
 	}
 }
 
@@ -43,16 +45,28 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 	// Manual effect instances finish
 	for (auto Instance : GameplayEffectInstances)
 	{
-		Instance->OnFinishedDelegate.RemoveAll(this);
-		Instance->Finish();
+		if (Instance)
+		{
+			Instance->OnFinishedDelegate.RemoveAll(this);
+			Instance->Finish();
+		
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
+				*GetOwner()->GetName(), *Instance->Template->EffectTag.ToString());
+		}
 	}
 	GameplayEffectInstances.Empty();
 	
 	// Clean up active abilities
 	for (URogueGameplayAbility* Ability : ActiveAbilities)
 	{
-		Ability->AbilityEndedDelegate.RemoveAll(this);
-		Ability->EndAbility();
+		if (Ability)
+		{
+			Ability->AbilityEndedDelegate.RemoveAll(this);
+			Ability->EndAbility();
+			
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
+				*GetOwner()->GetName(), *Ability->AbilityTag.ToString());
+		}
 	}
 	ActiveAbilities.Empty();
 	
@@ -60,11 +74,6 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 }
 
 // Gameplay Tags
-
-bool URogueActionSystemComponent::HasActiveTag(const FGameplayTag Tag) const
-{
-	return ActiveTagCountMap.Contains(Tag);
-}
 
 void URogueActionSystemComponent::GrantActiveTag(const FGameplayTag Tag)
 {
@@ -76,23 +85,113 @@ void URogueActionSystemComponent::GrantActiveTag(const FGameplayTag Tag)
 	{
 		ActiveTagCountMap[Tag] += 1;
 	}
+			
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: grant active tag: %s, new count = %d."), 
+		*GetOwner()->GetName(), *Tag.ToString(), ActiveTagCountMap[Tag]);
 }
 	
 bool URogueActionSystemComponent::RemoveActiveTag(const FGameplayTag Tag)
 {
 	if (ActiveTagCountMap.Contains(Tag))
 	{
+		int OldCount = ActiveTagCountMap[Tag];
+		
 		ActiveTagCountMap[Tag] -= 1;
+		
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: remove active tag: %s, new count = %d."), 
+			*GetOwner()->GetName(), *Tag.ToString(), ActiveTagCountMap[Tag]);
+		
 		if (ActiveTagCountMap[Tag] <= 0)
 		{
 			ActiveTagCountMap.Remove(Tag);
+			
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: remove active tag from map as count <= 0: %s."), 
+				*GetOwner()->GetName(), *Tag.ToString());
 		}
+		
 		return true;
 	}
 	else
 	{
 		return false;
 	}
+}
+
+bool URogueActionSystemComponent::IsTagActive(const FGameplayTag Tag) const
+{
+	for (const TTuple<FGameplayTag, int>& Pair : ActiveTagCountMap)
+	{
+		if (Tag.MatchesTag(Pair.Key))
+		{
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s active: true."), 
+				*GetOwner()->GetName(), *Tag.ToString());
+			return true;
+		}
+	}
+	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s active: false."), 
+		*GetOwner()->GetName(), *Tag.ToString());
+	
+	return false;
+}
+
+void URogueActionSystemComponent::GrantBlockTag(const FGameplayTag Tag)
+{
+	if (!BlockedTagCountMap.Contains(Tag))
+	{
+		BlockedTagCountMap.Add(Tag, 1);
+	}
+	else
+	{
+		BlockedTagCountMap[Tag] += 1;
+	}
+	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: grant block tag: %s, new count = %d."), 
+		*GetOwner()->GetName(), *Tag.ToString(), BlockedTagCountMap[Tag]);
+}
+
+bool URogueActionSystemComponent::RemoveBlockTag(const FGameplayTag Tag)
+{
+	if (BlockedTagCountMap.Contains(Tag))
+	{
+		BlockedTagCountMap[Tag] -= 1;
+		
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: remove block tag: %s, new count = %d."), 
+			*GetOwner()->GetName(), *Tag.ToString(), BlockedTagCountMap[Tag]);
+		
+		if (BlockedTagCountMap[Tag] <= 0)
+		{
+			BlockedTagCountMap.Remove(Tag);
+			
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: remove block tag %s from count map as count <= 0."), 
+				*GetOwner()->GetName(), *Tag.ToString());
+		}
+		
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool URogueActionSystemComponent::IsTagBlocked(const FGameplayTag Tag) const
+{
+	for (const TTuple<FGameplayTag, int>& Pair : BlockedTagCountMap)
+	{
+		if (Tag.MatchesTag(Pair.Key))
+		{
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s blocked: true."), 
+				*GetOwner()->GetName(), *Tag.ToString());
+			
+			return true;
+		}
+	}
+	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s blocked: false."), 
+		*GetOwner()->GetName(), *Tag.ToString());
+	
+	return false;
 }
 
 // Ability
@@ -104,9 +203,17 @@ bool URogueActionSystemComponent::FindGrantedAbility(FGameplayTag AbilityTag, FR
 		if (Ability.AbilityTag.MatchesTag(AbilityTag))
 		{
 			OutAbilitySpec = Ability;
+			
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: found granted ability %s."), 
+				*GetOwner()->GetName(), *Ability.AbilityTag.ToString());
+			
 			return true;
 		}
 	}
+
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: did not find granted ability %s."), 
+		*GetOwner()->GetName(), *AbilityTag.ToString());
+
 	return false;
 }
 
@@ -114,7 +221,6 @@ bool URogueActionSystemComponent::GrantGameplayAbility(TSubclassOf<URogueGamepla
 {
 	if (!GameplayAbilityCls)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Empty ability class provided for %s."), *GetOwner()->GetName());
 		return false;
 	}
 	
@@ -122,16 +228,16 @@ bool URogueActionSystemComponent::GrantGameplayAbility(TSubclassOf<URogueGamepla
 	
 	if (not AbilityCDO->CheckCanBeGranted(this))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Ability %s cannot be granted for %s."), 
-			*AbilityCDO->AbilityTag.ToString(), *GetOwner()->GetName());
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Ability %s cannot be granted."), 
+			*GetOwner()->GetName(), *AbilityCDO->AbilityTag.ToString());
 		return false;
 	}
 	
 	FRogueGameplayAbilitySpec FoundAbility;
 	if (FindGrantedAbility(AbilityCDO->AbilityTag, FoundAbility))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Ability %s is already granted for %s."), 
-			*AbilityCDO->AbilityTag.ToString(), *GetOwner()->GetName());
+		UE_LOG(LogRogueGAS, Warning, TEXT("%s ASC: Ability %s is already granted."), 
+			*GetOwner()->GetName(), *AbilityCDO->AbilityTag.ToString());
 		return false;
 	}
 	
@@ -151,40 +257,69 @@ bool URogueActionSystemComponent::GrantGameplayAbility(TSubclassOf<URogueGamepla
 	GrantedAbilitySpecs.Add(AbilitySpec);
 	
 	OutAbilitySpec = AbilitySpec;
+	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Ability %s is granted."), 
+		*GetOwner()->GetName(), *AbilityCDO->AbilityTag.ToString());
+	
 	return true;
 }
 
 bool URogueActionSystemComponent::TryActivateAbilityByTag(FGameplayTag AbilityTag, URogueGameplayAbility*& OutAbility)
 {
-	FRogueGameplayAbilitySpec FoundAbility;
-	if (!FindGrantedAbility(AbilityTag, FoundAbility))
+	FRogueGameplayAbilitySpec FoundAbilitySpec;
+	if (!FindGrantedAbility(AbilityTag, FoundAbilitySpec))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Ability %s is not granted for %s"), 
-			*AbilityTag.ToString(), *GetOwner()->GetName())
+		UE_LOG(LogRogueGAS, Warning, TEXT("%s ASC: Ability %s is not granted. Try activate failed."), 
+			*GetOwner()->GetName(), *AbilityTag.ToString());
 		return false;
 	}
 	
-	// If ability is already running, skip
+	// Check running abilities
 	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
 	{
 		if (ActiveAbility->AbilityTag.MatchesTag(AbilityTag))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Ability %s is already running for %s"),
-				*AbilityTag.ToString(), *GetOwner()->GetName());
-			return false;
+			if (ActiveAbility->bRetriggerInstance)
+			{
+				// Handle ability retrigger
+				if (ActiveAbility->CanActivateAbility())
+				{
+					UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Found ability %s existing instance. End this instance for later retrigger."), 
+						*GetOwner()->GetName(), *AbilityTag.ToString());
+					ActiveAbility->EndAbility();
+					break;
+				}
+				else
+				{
+					UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Found ability %s existing instance, it is marked to be retrigger but can activate failed."), 
+						*GetOwner()->GetName(), *AbilityTag.ToString());
+					return false;
+				}
+			}
+			else
+			{
+				// non-retrigger ability is already running, skip
+				UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Found ability %s existing instance and it is not marked as retrigger. Skip new activation."), 
+					*GetOwner()->GetName(), *AbilityTag.ToString());
+				return false;
+			}
 		}
 	}
 	
-	if (ActivateAbilityBySpec(FoundAbility, OutAbility))
+	if (ActivateAbilityBySpec(FoundAbilitySpec, OutAbility))
 	{
 		// Register end ability callback
 		if (OutAbility->InstancePolicy != ERogueGameplayAbilityInstancePolicy::eNotInstanced)
 		{
 			OutAbility->AbilityEndedDelegate.AddUniqueDynamic(this, &URogueActionSystemComponent::OnAbilityEnded);
 		}
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Try activate ability %s by tag succeeds."), 
+			*GetOwner()->GetName(), *AbilityTag.ToString());
 		return true;
 	}
 	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Try activate ability %s by tag fails."), 
+		*GetOwner()->GetName(), *AbilityTag.ToString());
 	return false;
 }
 
@@ -195,11 +330,25 @@ bool URogueActionSystemComponent::StopAbilityByTag(FGameplayTag AbilityTag)
 		if (ActiveAbility->AbilityTag.MatchesTag(AbilityTag))
 		{
 			ActiveAbility->EndAbility();
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Stop ability %s by tag succeeds."), 
+				*GetOwner()->GetName(), *AbilityTag.ToString());
 			return true;
 		}
 	}
 	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: stop ability %s by tag fails, not found in active list"), 
+		*GetOwner()->GetName(), *AbilityTag.ToString());
 	return false;
+}
+
+FGameplayTagContainer URogueActionSystemComponent::GetActiveAbilityTags() const
+{
+	FGameplayTagContainer Tags;
+	for (URogueGameplayAbility* ActiveAbility : ActiveAbilities)
+	{
+		Tags.AddTag(ActiveAbility->AbilityTag);
+	}
+	return Tags;
 }
 
 bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbilitySpec& AbilitySpec, URogueGameplayAbility*& OutAbility)
@@ -213,6 +362,8 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 			AbilityCDO->ActivateAbility();
 			OutAbility = AbilityCDO;
 			// Not adding to the active ability list
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: activate ability %s by spec succeeds, instance is CDO."), 
+				*GetOwner()->GetName(), *OutAbility->AbilityTag.ToString());
 			return true;
 		}
 	}
@@ -231,9 +382,13 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 	{
 		OutAbility->ActivateAbility();
 		ActiveAbilities.Add(OutAbility);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: activate ability %s by spec succeeds, ability instance added to active list."), 
+				*GetOwner()->GetName(), *OutAbility->AbilityTag.ToString());
 		return true;
 	}
 	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: activate ability %s by spec fails."), 
+		*GetOwner()->GetName(), *OutAbility->AbilityTag.ToString());
 	return false;
 }
 
@@ -246,6 +401,8 @@ void URogueActionSystemComponent::OnAbilityEnded(URogueGameplayAbility* Ability,
 		{
 			ActiveAbilities.RemoveSingle(Ability);
 			Ability->AbilityEndedDelegate.RemoveAll(this);
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: on ability %s ended, remove it from active list."), 
+				*GetOwner()->GetName(), *Ability->AbilityTag.ToString());
 			break;
 		}
 	}
@@ -270,7 +427,8 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 {
 	if (GameplayEffect == nullptr)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Empty gameplay effect from %s"), *Sender->GetName());
+		UE_LOG(LogRogueGAS, Warning, TEXT("%s ASC: CanApplyGameplayEffect: empty gameplay effect from %s"), *GetOwner()->GetName(), 
+			*Sender->GetName());
 		return false;
 	}
 	
@@ -280,7 +438,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 	// Tag check
 	if (!GameplayEffectCanApplyTagCheck(GameplayEffect, FailMessage))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("%s"), *FailMessage);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s"), *FailMessage);
 		return false;
 	}
 	
@@ -288,7 +446,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 	if (GameplayEffect->StackPolicy == ERogueGameplayEffectStackPolicy::eAccumulate and 
 		!GameplayEffectCanApplyStackCheck(GameplayEffect, FailMessage))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("%s"), *FailMessage);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s"), *FailMessage);
 		return false;
 	}
 	
@@ -297,7 +455,7 @@ bool URogueActionSystemComponent::CanApplyGameplayEffect(const URogueGameplayEff
 	{
 		if (PermanentModify->Modifiers.Num() > 0 and !AttributeSet->CanAffordModifiers(PermanentModify->Modifiers, FailMessage))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("%s"), *FailMessage);
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s"), *FailMessage);
 			return false;
 		}
 		
@@ -312,12 +470,15 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 {
 	if (GameplayEffect == nullptr)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Empty gameplay effect from %s"), *Sender->GetName());
+		UE_LOG(LogRogueGAS, Warning, TEXT("%s ASC: Empty GE from sender %s, apply GE to self fails."), 
+			*GetOwner()->GetName(), *Sender->GetName());
 		return false;
 	}
 	
 	if (!ForceApply and !CanApplyGameplayEffect(GameplayEffect, this))
 	{
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Apply GE %s from %s to self fails (not force apply)."), 
+			*GetOwner()->GetName(), *GameplayEffect->GetName(), *Sender->GetName());
 		return false;
 	}
 	
@@ -326,6 +487,8 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 	{
 		const FRogueGameplayEffectPermanentModify* PermanentModify = GameplayEffect->ModifyPolicy.GetPtr<FRogueGameplayEffectPermanentModify>();
 		ApplyGameplayEffectModifiers(PermanentModify->Modifiers);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Apply GE %s from %s to self succeeds, instant apply."), 
+			*GetOwner()->GetName(), *GameplayEffect->GetName(), *Sender->GetName());
 		return true;
 	}
 	
@@ -343,6 +506,7 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 				GameplayEffectInstances.Remove(ExistingInstance);
 				ExistingInstance->OnFinishedDelegate.RemoveAll(this);
 				ExistingInstance->Finish();
+				break;
 			}
 		}
 	}
@@ -358,6 +522,8 @@ bool URogueActionSystemComponent::ApplyGameplayEffectToSelf(const URogueGameplay
 	
 	OutInstance = EffectInstance;
 	
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Apply GE %s from %s to self succeeds."), 
+		*GetOwner()->GetName(), *GameplayEffect->GetName(), *Sender->GetName());
 	return true;
 }
 
@@ -381,6 +547,8 @@ void URogueActionSystemComponent::ApplyGameplayEffectDebuffs(const TArray<FAttri
 	for (const FAttributeDebuffData& Debuff : Debuffs)
 	{
 		GrantActiveTag(Debuff.Tag);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Added GE debuff tag %s to active tag list."), 
+			*GetOwner()->GetName(), *Debuff.Tag.ToString());
 	}
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
@@ -397,30 +565,35 @@ void URogueActionSystemComponent::RemoveGameplayEffectDebuffs(const TArray<FAttr
 	for (const FAttributeDebuffData& Debuff : Debuffs)
 	{
 		RemoveActiveTag(Debuff.Tag);
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: Removed GE debuff tag %s from active tag list."), 
+			*GetOwner()->GetName(), *Debuff.Tag.ToString());
 	}
 	
 	FRogueAttributeSetSnapshot NewSnapshot = AttributeSet->TakeSnapshot();
 	BroadcastAttributeSetChanged(OldSnapshot, NewSnapshot);
 }
 
-TArray<FGameplayTag> URogueActionSystemComponent::GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& InGameplayEffectInstances)
+FGameplayTagContainer URogueActionSystemComponent::GetTagsFromEffectInstances(const TArray<URogueGameplayEffectInstance*>& InGameplayEffectInstances) const
 {
-	TArray<FGameplayTag> Tags;
+	FGameplayTagContainer Tags;
 	for (URogueGameplayEffectInstance* GameplayEffectInstance : InGameplayEffectInstances)
 	{
-		Tags.Add(GameplayEffectInstance->Template->EffectTag);
+		Tags.AddTag(GameplayEffectInstance->Template->EffectTag);
 	}
 	return Tags;
 }
 
 void URogueActionSystemComponent::AddActiveGameplayEffect(URogueGameplayEffectInstance* GameplayEffectInstance)
 {
-	TArray<FGameplayTag> OldTags = GetTagsFromEffectInstances(GameplayEffectInstances);
+	FGameplayTagContainer OldTags = GetTagsFromEffectInstances(GameplayEffectInstances);
 	
 	GameplayEffectInstances.Add(GameplayEffectInstance);
 	
-	TArray<FGameplayTag> NewTags = OldTags;
-	NewTags.Add(GameplayEffectInstance->Template->EffectTag);
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: GE instance %s added to active list."), 
+		*GetOwner()->GetName(), *GameplayEffectInstance->Template->GetName());
+	
+	FGameplayTagContainer NewTags = OldTags;
+	NewTags.AddTag(GameplayEffectInstance->Template->EffectTag);
 	GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
 }
 
@@ -430,14 +603,17 @@ bool URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffec
 	{
 		if (EffectInstance->MatchesTag(*GameplayEffectInstance))
 		{
-			TArray<FGameplayTag> OldTags = GetActiveGameplayEffectTags();
+			FGameplayTagContainer OldTags = GetActiveGameplayEffectTags();
 			
 			// Remove effect instance from list
 			GameplayEffectInstance->OnFinishedDelegate.RemoveAll(this);
 			GameplayEffectInstances.Remove(GameplayEffectInstance);
 			
-			TArray<FGameplayTag> NewTags = OldTags;
-			NewTags.Remove(GameplayEffectInstance->Template->EffectTag);
+			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: GE instance %s removed from active list."), 
+				*GetOwner()->GetName(), *GameplayEffectInstance->Template->GetName());
+			
+			FGameplayTagContainer NewTags = OldTags;
+			NewTags.RemoveTag(GameplayEffectInstance->Template->EffectTag);
 			GameplayEffectChangedDelegate.Broadcast(OldTags, NewTags);
 		
 			// GC
@@ -447,8 +623,8 @@ bool URogueActionSystemComponent::RemoveActiveGameplayEffect(URogueGameplayEffec
 		}
 	}
 	
-	UE_LOG(LogTemp, Warning, TEXT("%s Failed to remove active gameplay effect instance %s because it is not in list."), 
-	*GetOwner()->GetName(), *GameplayEffectInstance->Template->GetName());
+	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: GE instance %s failed to remove from active list due to not found."), 
+		*GetOwner()->GetName(), *GameplayEffectInstance->Template->GetName());
 	return false;
 }
 
@@ -468,23 +644,31 @@ bool URogueActionSystemComponent::GameplayEffectCanApplyTagCheck(const URogueGam
 	// Pre-condition checks
 	for (const FGameplayTag& RequireTag : GameplayEffect->TagsThatRequire)
 	{
-		if (!HasActiveTag(RequireTag))
+		if (!IsTagActive(RequireTag))
 		{
 			FailMessage.Append("Missing required tag " + RequireTag.ToString());
 			return false;
 		}
 	}
 	
+	// Self block tags check
 	if (GameplayEffect->TagsThatBlock.Num() > 0)
 	{
 		for (const FGameplayTag& Tag : GameplayEffect->TagsThatBlock)
 		{
-			if (HasActiveTag(Tag))
+			if (IsTagActive(Tag))
 			{
 				FailMessage.Append("blocked by tag " + Tag.ToString());
 				return false;
 			}
 		}
+	}
+	
+	// Other block tags check
+	if (IsTagBlocked(GameplayEffect->EffectTag))
+	{
+		FailMessage.Append("effect tag in the block tag list");
+		return false;
 	}
 	
 	return true;
@@ -516,12 +700,12 @@ int URogueActionSystemComponent::GetGameplayEffectStackCount(const URogueGamepla
 	return count;
 }
 
-TArray<FGameplayTag> URogueActionSystemComponent::GetActiveGameplayEffectTags() const
+FGameplayTagContainer URogueActionSystemComponent::GetActiveGameplayEffectTags() const
 {
-	TArray<FGameplayTag> Tags;
+	FGameplayTagContainer Tags;
 	for (URogueGameplayEffectInstance* GameplayEffectInstance : GameplayEffectInstances)
 	{
-		Tags.Add(GameplayEffectInstance->Template->EffectTag);
+		Tags.AddTag(GameplayEffectInstance->Template->EffectTag);
 	}
 	return Tags;
 }

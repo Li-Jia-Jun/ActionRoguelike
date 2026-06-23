@@ -18,12 +18,18 @@ bool URogueGameplayAbility::CanActivateAbility_Implementation() const
 	// Tags check
 	for (const FGameplayTag& Tag : TagsThatBlock)
 	{
-		if (OwnerActionSystemComponent->HasActiveTag(Tag))
+		if (OwnerActionSystemComponent->IsTagActive(Tag))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated, blocked by tag %s."), 
 				*GetName(), *Tag.ToString());
 			return false;
 		}
+	}
+	if (OwnerActionSystemComponent->IsTagBlocked(AbilityTag))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("%s cannot be activated, it is in the block list"), 
+			*GetName());
+		return false;
 	}
 	
 	// Cost check 
@@ -97,6 +103,8 @@ bool URogueGameplayAbility::CommitAbility_Implementation()
 		OwnerActionSystemComponent->ApplyGameplayEffectToSelf(ActiveEffect, this, false, EffectInstance);
 		ActiveEffectInstances.Add(TWeakObjectPtr<URogueGameplayEffectInstance>(EffectInstance));
 	}
+	// Also add self tag
+	OwnerActionSystemComponent->GrantActiveTag(AbilityTag);
 	
 	// Grant tags
 	for (const FGameplayTag& Tag : TagsToGrant)
@@ -122,9 +130,6 @@ void URogueGameplayAbility::EndAbility_Implementation()
 	}
 	ActiveEffectInstances.Empty();
 	
-	// Clean up delegate
-	OwnerActionSystemComponent->GameplayEventReceivedDelegate.RemoveAll(this);
-	
 	// Clean up anim
 	if (AnimInstanceToTrack.IsValid())
 	{
@@ -132,14 +137,21 @@ void URogueGameplayAbility::EndAbility_Implementation()
 		AnimInstanceToTrack->OnMontageEnded.RemoveAll(this);
 	}
 	
-	// Clean up granted tags
-	for (const FGameplayTag& Tag : TagsToGrant)
+	// ASC clean up
+	if (OwnerActionSystemComponent)
 	{
-		OwnerActionSystemComponent->RemoveActiveTag(Tag);
+		OwnerActionSystemComponent->GameplayEventReceivedDelegate.RemoveAll(this);
+		
+		// Clean up granted tags
+		for (const FGameplayTag& Tag : TagsToGrant)
+		{
+			OwnerActionSystemComponent->RemoveActiveTag(Tag);
+		}
+		OwnerActionSystemComponent->RemoveActiveTag(AbilityTag);
+		
+		// Broadcast ending (ASC OnAbilityEnded will remove it from ActiveAbilities)
+		AbilityEndedDelegate.Broadcast(this, ComposeEndedData());
 	}
-	
-	// Broadcast ending
-	AbilityEndedDelegate.Broadcast(this, ComposeEndedData());
 }
 
 FRogueGameplayAbilityEndedData URogueGameplayAbility::ComposeEndedData() const
@@ -185,19 +197,31 @@ void URogueGameplayAbility::PlayAnimMontageAndTrackEvent(UAnimMontage* Montage, 
 	}
 }
 
+#if WITH_EDITOR
 EDataValidationResult URogueGameplayAbility::IsDataValid(FDataValidationContext& Context) const
 {
 	// Cost effect rules
 	if (CostEffect && CostEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectInstantApply::StaticStruct())
 	{
+		UE_LOG(LogTemp, Error, TEXT("Cost effect requires instant apply."));
 		return EDataValidationResult::Invalid;
 	}
 	
 	// Cooldown effect rules
 	if (CooldownEffect && CooldownEffect->DurationPolicy.GetScriptStruct() != FRogueGameplayEffectDurationApply::StaticStruct())
 	{
+		UE_LOG(LogTemp, Error, TEXT("Cooldown effect requires duration apply."));
+		return EDataValidationResult::Invalid;
+	}
+	
+	// Retrigger rule
+	if (bRetriggerInstance && InstancePolicy == ERogueGameplayAbilityInstancePolicy::eNotInstanced)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Retrigger cannot be not instanced. Please adjust InstancePolicy."));
 		return EDataValidationResult::Invalid;
 	}
 	
 	return EDataValidationResult::Valid;
 }
+#endif
+

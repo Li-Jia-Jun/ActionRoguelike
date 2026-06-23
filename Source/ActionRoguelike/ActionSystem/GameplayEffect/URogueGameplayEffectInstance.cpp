@@ -23,6 +23,20 @@ float URogueGameplayEffectInstance::GetTimeRemaining() const
 
 void URogueGameplayEffectInstance::Start()
 {
+	// Tags to grant
+	for (FGameplayTag Tag : Template->TagsToGrant)
+	{
+		OwnerActionSystemComponent->GrantActiveTag(Tag);
+	}
+	// Also grant its own Tag
+	OwnerActionSystemComponent->GrantActiveTag(Template->EffectTag);
+	
+	// Grant tags this block
+	for (FGameplayTag Tag : Template->TagsThisBlock)
+	{
+		OwnerActionSystemComponent->GrantBlockTag(Tag);
+	}
+	
 	// Create duration policy instance
 	if (const FRogueGameplayEffectPeriodicApply* PeriodicApply = Template->DurationPolicy.GetPtr<FRogueGameplayEffectPeriodicApply>())
 	{
@@ -80,6 +94,20 @@ void URogueGameplayEffectInstance::Finish()
 		}
 		OwnerActionSystemComponent->RemoveGameplayEffectDebuffs(Debuffs);
 	}
+	
+	// Handle tags to grant
+	for (FGameplayTag Tag : Template->TagsToGrant)
+	{
+		OwnerActionSystemComponent->RemoveActiveTag(Tag);
+	}
+	OwnerActionSystemComponent->RemoveActiveTag(Template->EffectTag);
+	
+	// Handle tags this block
+	for (FGameplayTag Tag : Template->TagsThisBlock)
+	{
+		OwnerActionSystemComponent->RemoveBlockTag(Tag);
+	}
+	
 	OnFinishedDelegate.Broadcast(this);
 };
 

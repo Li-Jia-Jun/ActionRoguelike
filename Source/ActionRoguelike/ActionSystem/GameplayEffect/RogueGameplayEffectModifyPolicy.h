@@ -25,7 +25,7 @@ struct FRogueGameplayEffectPermanentModify: public FRougeGameplayEffectModifyPol
 	TArray<TObjectPtr<URogueGameplayEffectCalculation>> Calculations;
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Effect")
-	TArray<FGameplayTag> EffectsToCure;
+	FGameplayTagContainer EffectsToCure;
 };
 
 USTRUCT(BlueprintType, DisplayName="Debuff Modify")

@@ -38,6 +38,7 @@ public:
 	
 	void Start();
 	
+	UPROPERTY(BlueprintAssignable)
 	FOnGameplayEffectInstanceFinishedSignature OnFinishedDelegate;
 	
 	bool MatchesTag(const URogueGameplayEffectInstance& OtherInstance) const

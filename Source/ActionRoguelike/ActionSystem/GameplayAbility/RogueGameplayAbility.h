@@ -51,28 +51,32 @@ public:
 		meta = (ToolTip = "Effects applied during active. Must be debuff modify policy and inifite duration policy"))
 	TArray<TObjectPtr<URogueGameplayEffect>> ActiveEffects;
 	
-	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
+	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability",
+		meta = (ToolTip = "If true, will retrigger ability instance when activated"))
 	ERogueGameplayAbilityInstancePolicy InstancePolicy;
+	
+	UPROPERTY(EditDefaultsOnly, Category = "Rogue Gameplay Ability")
+	bool bRetriggerInstance = false;
 	
 	UPROPERTY(BlueprintCallable, Category = "Rogue Gameplay Ability")
 	FAbilityEndedSignature AbilityEndedDelegate;
 	
-	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	bool CheckCanBeGranted(URogueActionSystemComponent* ActionSystemComponent) const;
 	
-	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	bool CanActivateAbility() const;
 	
-	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	void ActivateAbility();
 	
-	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	bool CommitAbility();
 	
-	UFUNCTION(BlueprintNativeEvent, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	void EndAbility();
 	
-	UFUNCTION(BlueprintCallable, Category = "Rogue Gameplay Ability")
+	UFUNCTION(BlueprintCallable, BlueprintCallable, Category = "Rogue Gameplay Ability")
 	float CooldownTimeRemaining() const;
 	
 	bool operator==(const URogueGameplayAbility& Other) const

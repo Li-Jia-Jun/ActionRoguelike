@@ -4,7 +4,7 @@
 #include "RogueGameplayEffectDurationPolicy.h"
 #include "RogueGameplayEffectModifyPolicy.h"	
 
-
+#if WITH_EDITOR
 EDataValidationResult URogueGameplayEffect::IsDataValid(FDataValidationContext& Context) const
 {
 	// Debuff modify can only apply to duration policy
@@ -17,5 +17,19 @@ EDataValidationResult URogueGameplayEffect::IsDataValid(FDataValidationContext& 
 		}
 	}
 	
+	if (DurationPolicy.GetScriptStruct() == FRogueGameplayEffectInstantApply::StaticStruct())
+	{
+		if (TagsToGrant.Num() > 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("TagsToGrant will be skipped for instant apply."));
+		}
+		
+		if (TagsThisBlock.Num() > 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("TagsThisBlock will be skipped for instant apply."));
+		}
+	}
+	
 	return EDataValidationResult::Valid;
 }
+#endif
