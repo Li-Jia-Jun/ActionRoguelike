@@ -88,6 +88,11 @@ public:
 	{
 		return AbilityTag.MatchesTag(OtherTag);
 	}
+	
+	virtual bool ImplementsGetWorld() const override
+	{
+		return true;
+	}
 
 protected:
 	

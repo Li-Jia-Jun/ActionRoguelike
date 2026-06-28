@@ -40,8 +40,10 @@ void URogueActionSystemComponent::BeginPlay()
 	}
 }
 
-void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
+void URogueActionSystemComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	Super::EndPlay(EndPlayReason);
+	
 	// Manual effect instances finish
 	for (auto Instance : GameplayEffectInstances)
 	{
@@ -49,9 +51,12 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 		{
 			Instance->OnFinishedDelegate.RemoveAll(this);
 			Instance->Finish();
-		
-			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
-				*GetOwner()->GetName(), *Instance->Template->EffectTag.ToString());
+			
+			if (IsValid(GetOwner()))
+			{
+				UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
+					*GetOwner()->GetName(), *Instance->Template->EffectTag.ToString());
+			}
 		}
 	}
 	GameplayEffectInstances.Empty();
@@ -64,13 +69,14 @@ void URogueActionSystemComponent::OnComponentDestroyed(bool bDestroyingHierarchy
 			Ability->AbilityEndedDelegate.RemoveAll(this);
 			Ability->EndAbility();
 			
-			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
-				*GetOwner()->GetName(), *Ability->AbilityTag.ToString());
+			if (IsValid(GetOwner()))
+			{
+				UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: clean up GE instance on component destroyed: %s."), 
+					*GetOwner()->GetName(), *Ability->AbilityTag.ToString());
+			}
 		}
 	}
 	ActiveAbilities.Empty();
-	
-	Super::OnComponentDestroyed(bDestroyingHierarchy);
 }
 
 // Gameplay Tags
@@ -85,6 +91,8 @@ void URogueActionSystemComponent::GrantActiveTag(const FGameplayTag Tag)
 	{
 		ActiveTagCountMap[Tag] += 1;
 	}
+	
+	ActiveTagChangedDelegate.Broadcast(Tag, ActiveTagCountMap[Tag]);
 			
 	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: grant active tag: %s, new count = %d."), 
 		*GetOwner()->GetName(), *Tag.ToString(), ActiveTagCountMap[Tag]);
@@ -109,6 +117,8 @@ bool URogueActionSystemComponent::RemoveActiveTag(const FGameplayTag Tag)
 				*GetOwner()->GetName(), *Tag.ToString());
 		}
 		
+		ActiveTagChangedDelegate.Broadcast(Tag, OldCount - 1);
+		
 		return true;
 	}
 	else
@@ -123,13 +133,13 @@ bool URogueActionSystemComponent::IsTagActive(const FGameplayTag Tag) const
 	{
 		if (Tag.MatchesTag(Pair.Key))
 		{
-			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s active: true."), 
+			UE_LOG(LogRogueGAS, VeryVerbose, TEXT("%s ASC: is tag %s active: true."), 
 				*GetOwner()->GetName(), *Tag.ToString());
 			return true;
 		}
 	}
 	
-	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s active: false."), 
+	UE_LOG(LogRogueGAS, VeryVerbose, TEXT("%s ASC: is tag %s active: false."), 
 		*GetOwner()->GetName(), *Tag.ToString());
 	
 	return false;
@@ -140,6 +150,9 @@ void URogueActionSystemComponent::GrantBlockTag(const FGameplayTag Tag)
 	if (!BlockedTagCountMap.Contains(Tag))
 	{
 		BlockedTagCountMap.Add(Tag, 1);
+		
+		// New granted blocked tag may end active abilities
+		UpdateActiveAbilityOnNewBlockedTag(Tag);
 	}
 	else
 	{
@@ -181,17 +194,36 @@ bool URogueActionSystemComponent::IsTagBlocked(const FGameplayTag Tag) const
 	{
 		if (Tag.MatchesTag(Pair.Key))
 		{
-			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s blocked: true."), 
+			UE_LOG(LogRogueGAS, VeryVerbose, TEXT("%s ASC: is tag %s blocked: true."), 
 				*GetOwner()->GetName(), *Tag.ToString());
 			
 			return true;
 		}
 	}
 	
-	UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: is tag %s blocked: false."), 
+	UE_LOG(LogRogueGAS, VeryVerbose, TEXT("%s ASC: is tag %s blocked: false."), 
 		*GetOwner()->GetName(), *Tag.ToString());
 	
 	return false;
+}
+
+void URogueActionSystemComponent::UpdateActiveAbilityOnNewBlockedTag(const FGameplayTag& NewBlockedTag)
+{
+	TArray<URogueGameplayAbility*> AbilitiesToRemove;
+	for (URogueGameplayAbility* Ability : ActiveAbilities)
+	{
+		if (Ability->AbilityTag.MatchesTag(NewBlockedTag))
+		{
+			AbilitiesToRemove.Add(Ability);
+		}
+	}
+
+	for (URogueGameplayAbility* Ability : AbilitiesToRemove)
+	{
+		Ability->EndAbility();
+		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: active ability %s ends by new blocked tag %s."), 
+			*GetOwner()->GetName(), *Ability->AbilityTag.ToString(), *NewBlockedTag.ToString());
+	}
 }
 
 // Ability
@@ -382,6 +414,7 @@ bool URogueActionSystemComponent::ActivateAbilityBySpec(const FRogueGameplayAbil
 	{
 		OutAbility->ActivateAbility();
 		ActiveAbilities.Add(OutAbility);
+		AbilityActivationChangedDelegate.Broadcast(OutAbility->AbilityTag, true);
 		UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: activate ability %s by spec succeeds, ability instance added to active list."), 
 				*GetOwner()->GetName(), *OutAbility->AbilityTag.ToString());
 		return true;
@@ -401,6 +434,7 @@ void URogueActionSystemComponent::OnAbilityEnded(URogueGameplayAbility* Ability,
 		{
 			ActiveAbilities.RemoveSingle(Ability);
 			Ability->AbilityEndedDelegate.RemoveAll(this);
+			AbilityActivationChangedDelegate.Broadcast(Ability->AbilityTag, false);
 			UE_LOG(LogRogueGAS, Verbose, TEXT("%s ASC: on ability %s ended, remove it from active list."), 
 				*GetOwner()->GetName(), *Ability->AbilityTag.ToString());
 			break;

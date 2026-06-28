@@ -11,6 +11,7 @@
 #include "RogueSharedGameplayTags.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
+#include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 
 ASPlayerCharacter::ASPlayerCharacter()
 {
@@ -88,6 +89,18 @@ void ASPlayerCharacter::BeginPlay()
 	HitOverlayMID = UMaterialInstanceDynamic::Create(GetMesh()->GetOverlayMaterial(), this);
 	GetMesh()->SetOverlayMaterial(HitOverlayMID);
 	GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
+}
+
+bool ASPlayerCharacter::IsAlive() const
+{
+	FRogueAttributeSetSnapshot AttributeSetSnapshot = ActionSystemComp->TakeAttributeSnapshot();
+	FAttributeNumericData CurrentHealthData;
+	if (UAttributeSetFunctionLibrary::FindAttributeDataByTag(AttributeSetSnapshot.Attributes, RogueSharedGameplayTags::Attribute_CurrentHealth, CurrentHealthData))
+	{
+		return CurrentHealthData.CurrentValue > 0;
+	}
+	
+	return false;
 }
 
 void ASPlayerCharacter::Move(const FInputActionValue& InValue)

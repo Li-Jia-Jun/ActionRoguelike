@@ -36,6 +36,9 @@ public:
 	
 	virtual void BeginPlay() override;
 	
+	UFUNCTION(BlueprintCallable)
+	bool IsAlive() const;
+	
 	// IAbilityAttackInfoProvider
 	
 	virtual FTransform GetAimingTransform_Implementation() const override;

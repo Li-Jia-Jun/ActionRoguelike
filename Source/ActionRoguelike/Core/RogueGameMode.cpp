@@ -1,11 +1,11 @@
 
 
 
-#include "RougeGameMode.h"
+#include "RogueGameMode.h"
 #include "Player/RoguePlayerController.h"
 
 
-ARougeGameMode::ARougeGameMode()
+ARogueGameMode::ARogueGameMode()
 {
 	PlayerControllerClass = ARoguePlayerController::StaticClass();
 }

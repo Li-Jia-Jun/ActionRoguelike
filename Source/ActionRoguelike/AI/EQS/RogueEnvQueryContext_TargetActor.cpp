@@ -11,6 +11,8 @@
 
 void URogueEnvQueryContext_TargetActor::ProvideContext(FEnvQueryInstance& QueryInstance, FEnvQueryContextData& ContextData) const
 {
+	Super::ProvideContext(QueryInstance, ContextData);
+	
 	if (ARogueEQSTesingPawn* TestingPawn = Cast<ARogueEQSTesingPawn>(QueryInstance.Owner.Get()))
 	{
 		// For testing pawn, TargetActor is from property

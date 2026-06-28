@@ -33,6 +33,14 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 	FReceiveGameplayEventSignature, FGameplayTag, EventTag, FRogueGameplayEventData, Payload
 	);
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FAbilityActivationChagnedSignature, FGameplayTag, AbilityTag, bool, IsActivated	
+);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+	FActiveTagChagnedSignature, FGameplayTag, Tag, int, NewCount	
+);
+
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent), HideCategories=(Navigtaion, Tags, Cooking))
 class ACTIONROGUELIKE_API URogueActionSystemComponent : public UActorComponent
@@ -44,7 +52,7 @@ public:
 	
 	virtual void BeginPlay() override;
 	
-	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	
 	UFUNCTION(BlueprintCallable)
 	void GrantActiveTag(const FGameplayTag Tag);
@@ -95,10 +103,16 @@ public:
 	
 	// Delegates
 	
-	UPROPERTY(BlueprintAssignable, Category="GameplayEvent")
+	UPROPERTY(BlueprintAssignable, Category="Rogue Gameplay Ability")
+	FAbilityActivationChagnedSignature AbilityActivationChangedDelegate;
+	
+	UPROPERTY(BlueprintAssignable, Category="Rogue Gameplay Tags")
+	FActiveTagChagnedSignature ActiveTagChangedDelegate;
+	
+	UPROPERTY(BlueprintAssignable, Category="Rogue Gameplay Event")
 	FReceiveGameplayEventSignature GameplayEventReceivedDelegate;
 	
-	UPROPERTY(BlueprintAssignable, Category="GameplayEffect")
+	UPROPERTY(BlueprintAssignable, Category="Rogue Gameplay Effect")
 	FGameplayEffectChangedSignature GameplayEffectChangedDelegate;
 	
 	UPROPERTY(BlueprintAssignable, Category="AttributeSet")
@@ -146,6 +160,8 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category="Rogue Gameplay Tags",
 		meta=(ToolTip = "Tags that are being blocked and their counts."))
 	TMap<FGameplayTag, int32> BlockedTagCountMap;
+	
+	void UpdateActiveAbilityOnNewBlockedTag(const FGameplayTag& NewBlockedTag);
 	
 	// Gameplay Ability
 	

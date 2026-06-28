@@ -4,17 +4,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
-#include "RougeGameMode.generated.h"
+#include "RogueGameMode.generated.h"
 
 /**
  * 
  */
 UCLASS()
-class ACTIONROGUELIKE_API ARougeGameMode : public AGameModeBase
+class ACTIONROGUELIKE_API ARogueGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
 	
 public:
-	ARougeGameMode();
+	ARogueGameMode();
 	
 };
