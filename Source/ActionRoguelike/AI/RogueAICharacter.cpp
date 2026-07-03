@@ -5,9 +5,9 @@
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "UI/RogueAttributeBarWidgetComponent.h"
 #include "RogueSharedGameplayTags.h"
+#include "Core/RogueGameInstance.h"
 
 
-// Sets default values
 ARogueAICharacter::ARogueAICharacter()
 {
 	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
@@ -21,7 +21,6 @@ ARogueAICharacter::ARogueAICharacter()
 	HealthAttributeBarWidgetComp->SetDrawSize(FVector2D(100.0f, 15.0f));
 }
 
-// Called when the game starts or when spawned
 void ARogueAICharacter::BeginPlay()
 {
 	Super::BeginPlay();
@@ -32,6 +31,15 @@ void ARogueAICharacter::BeginPlay()
 	HitOverlayMID = UMaterialInstanceDynamic::Create(GetMesh()->GetOverlayMaterial(), this);
 	GetMesh()->SetOverlayMaterial(HitOverlayMID);
 	GetMesh()->SetOverlayMaterialMaxDrawDistance(1);
+	
+	GetGameInstance<URogueGameInstance>()->AliveAIEnemies.Add(this);
+}
+
+void ARogueAICharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+	
+	GetGameInstance<URogueGameInstance>()->AliveAIEnemies.RemoveSingleSwap(this);
 }
 
 void ARogueAICharacter::OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload)
