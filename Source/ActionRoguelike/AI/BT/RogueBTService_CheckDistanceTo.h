@@ -21,7 +21,10 @@ class ACTIONROGUELIKE_API URogueBTService_CheckDistanceTo : public UBTService
 	FBlackboardKeySelector WithinRangeKey;
 
 	UPROPERTY(EditAnywhere, Category="AI")
-	float DistanceRange = 500;
+	float DistanceRange = 1000;
+	
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ToolTip="If checked, the service will return true if the owner is outside the distance range."))
+	bool ReverseCheck = false;
 	
 public:
 	URogueBTService_CheckDistanceTo();

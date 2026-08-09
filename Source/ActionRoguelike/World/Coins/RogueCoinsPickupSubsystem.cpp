@@ -90,7 +90,18 @@ void URogueCoinsPickupSubsystem::Tick(float DeltaTime)
 	UWorld* World = GetWorld();
 	
 	// Get player locations
-	FVector PlayerLocation = World->GetFirstPlayerController()->GetCharacter()->GetActorLocation();
+	APlayerController* PlayerController = World->GetFirstPlayerController();
+	if (PlayerController == nullptr)
+	{
+		return;
+	}
+	
+	ACharacter* Character = PlayerController->GetCharacter();
+	if (Character == nullptr)
+	{
+		return;
+	}
+	FVector PlayerLocation = Character->GetActorLocation();
 
 	const float PickupRadiusSquared = 22500.0f; // radius = 150
 	

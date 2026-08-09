@@ -37,6 +37,17 @@ void ARoguePrimaryGameMode::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	
+	APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
+	if (PlayerController == nullptr)
+	{
+		return;
+	}
+	ACharacter* PlayerCharacter = PlayerController->GetPawn<ACharacter>();
+	if (PlayerCharacter == nullptr)
+	{
+		return;
+	}
+	
 	float TotalTimeElapsed = GetWorld()->GetTimeSeconds();
 	
 	// Enemy Spawn Directors credits update
