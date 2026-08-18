@@ -10,7 +10,7 @@ public class ActionRoguelike : ModuleRules
 
 		PublicIncludePaths.AddRange(new string[] { "ActionRoguelike" }); // So include path don't have to include ActionRoguelike everytime
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "GameplayTags", "UMG", "AIModule", "NavigationSystem", "SignificanceManager" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "GameplayTags", "UMG", "AIModule", "NavigationSystem", "SignificanceManager", "Mover" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "EnhancedInput", "Niagara", "DeveloperSettings"});
 

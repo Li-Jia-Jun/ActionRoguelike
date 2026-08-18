@@ -32,8 +32,20 @@
 			"Enabled": true
 		},
 		{
-		"Name": "SignificanceManager",
-		"Enabled": true
+			"Name": "SignificanceManager",
+			"Enabled": true
+		},
+		{
+			"Name": "Mover",
+			"Enabled": true
+		},
+		{
+			"Name": "MoverExamples",
+			"Enabled": true
+		},
+		{
+			"Name": "MoverIntegrations",
+			"Enabled": true
 		}
 	]
 }

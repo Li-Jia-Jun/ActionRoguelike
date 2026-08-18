@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "MoverSimulationTypes.h"
 #include "ActionSystem/Interface/AbilityAttackInfoProvider.h"
 #include "ActionSystem/GameplayAbility/FRogueGameplayAbilitySpec.h"
 #include "ActionSystem/AttributeSet//RogueAttributeSet.h"
@@ -17,34 +18,48 @@ class UCameraComponent;
 class USpringArmComponent;
 class UInputAction;
 class UAnimMontage;
+class UCharacterMoverComponent;
+class UCommonLegacyMovementSettings;
 struct FInputActionValue;
 struct FInputActionInstance;
 struct FRogueHealthAttribute;
+struct FMoverInputCmdContext;
 
 
 UCLASS()
-class ACTIONROGUELIKE_API ASPlayerCharacter : public ACharacter, public IAbilityAttackInfoProvider
+class ACTIONROGUELIKE_API ASPlayerCharacter : public ACharacter, public IAbilityAttackInfoProvider, public IMoverInputProducerInterface
 {
 	GENERATED_BODY()
-	
+
 public:
 	ASPlayerCharacter();
 
 	virtual void PostInitializeComponents() override;
-	
+
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
-	
+
 	virtual void BeginPlay() override;
-	
+
 	UFUNCTION(BlueprintCallable)
 	bool IsAlive() const;
-	
+
 	// IAbilityAttackInfoProvider
-	
+
 	virtual FTransform GetAimingTransform_Implementation() const override;
 
 protected:
-	
+	// IMoverInputProducerInterface: authors the input command for the next Mover simulation frame.
+	// (BlueprintNativeEvent override must use the _Implementation suffix.)
+	virtual void ProduceInput_Implementation(int32 SimTimeMs, FMoverInputCmdContext& InputCmdResult) override;
+
+	// Returns the shared movement settings owned by the Mover component (holds MaxSpeed, etc.). May be null before init.
+	UCommonLegacyMovementSettings* GetMoverSettings() const;
+
+	// Single writer of the Mover MaxSpeed setting: base * MovementSpeedScale attribute (which the Sprint GE boosts).
+	void RefreshMaxSpeed();
+
+protected:
+
 	UPROPERTY(EditDefaultsOnly, Category = "Ability")
 	TArray<TSubclassOf<URogueGameplayAbility>> InbornAbilities;
 	
@@ -66,9 +81,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement")
 	TSubclassOf<URogueGameplayAbility> SprintAbilityCls;
 	FRogueGameplayAbilitySpec SprintAbilitySpec;
-	
+
+	// Base (unscaled) max speed captured from the Mover shared settings at BeginPlay.
 	float OriginalMovementMaxSpeed = 0.0f;
-	
+
+	// Latest MovementSpeedScale attribute value, applied to Mover's MaxSpeed in RefreshMaxSpeed().
+	float CurrentSpeedScale = 1.0f;
+
 	UPROPERTY(EditDefaultsOnly, Category="Death")
 	TObjectPtr<UAnimMontage> DeathMontage;
 	
@@ -102,12 +121,28 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category="Component")
 	TObjectPtr<USpringArmComponent> SpringArmComp;
 
+	// Drives movement via the Mover plugin (replaces the neutralized CharacterMovementComponent)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
+	TObjectPtr<UCharacterMoverComponent> MoverComp;
+
+	// --- Cached input, consumed by ProduceInput() each simulation frame ---
+	// Raw local-space move intent (X=forward, Y=right), rotated into world space at input-production time
+	FVector CachedMoveInputIntent = FVector::ZeroVector;
+	bool bIsJumpPressed = false;
+	bool bIsJumpJustPressed = false;
+
 	void Move(const FInputActionValue& InValue);
 
+	void MoveCompleted(const FInputActionValue& InValue);
+
 	void Look(const FInputActionValue& InValue);
-	
+
+	void JumpStart(const FInputActionValue& InValue);
+
+	void JumpStop(const FInputActionValue& InValue);
+
 	void SprintStart(const FInputActionValue& InValue);
-	
+
 	void SprintStop(const FInputActionValue& InValue);
 
 	void PrimaryAttack(const FInputActionValue& InValue);
