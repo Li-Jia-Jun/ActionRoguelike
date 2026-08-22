@@ -10,6 +10,7 @@ void URogueAttributeSet::InitByTemplate(URogueAttributeSetTemplate* InTemplate)
 {
 	Template = InTemplate;
 	Attributes = InTemplate->Attributes;
+	Debuffs = TArray<FAttributeDebuffData>();
 	AttributeRelationships = InTemplate->AttributeRelationships;
 	
 	RecalculateAttributes();
