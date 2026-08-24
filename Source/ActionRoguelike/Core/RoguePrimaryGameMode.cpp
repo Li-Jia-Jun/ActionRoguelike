@@ -50,55 +50,58 @@ void ARoguePrimaryGameMode::Tick(float DeltaSeconds)
 	
 	float TotalTimeElapsed = GetWorld()->GetTimeSeconds();
 	
-	// Enemy Spawn Directors credits update
-	URogueGameInstance* GI = GetGameInstance<URogueGameInstance>();
-	for (int i = 0; i < EnemySpawnDirectorData.Num(); i++)
+	if (bEnableEnemySpawn)
 	{
-		FRogueAIEnemySpawnDirectorData& Director = EnemySpawnDirectorData[i];
-		if (Director.EnemySpawnData == nullptr)
+		// Enemy Spawn Directors credits update
+		URogueGameInstance* GI = GetGameInstance<URogueGameInstance>();
+		for (int i = 0; i < EnemySpawnDirectorData.Num(); i++)
 		{
-			continue;
+			FRogueAIEnemySpawnDirectorData& Director = EnemySpawnDirectorData[i];
+			if (Director.EnemySpawnData == nullptr)
+			{
+				continue;
+			}
+		
+			float CreditsPerSecond = Director.CreditGainCurve.GetRichCurve()->Eval(TotalTimeElapsed);
+			Director.CurrentCredits += CreditsPerSecond * DeltaSeconds;
+		
+			FString DebugMessage = FString::Printf(TEXT("Director %s: Total Credits {%.2f}, Next Tick Time {%.2f}"), 
+				*Director.Name.ToString(), Director.CurrentCredits, Director.NextTickTime);
+			GEngine->AddOnScreenDebugMessage(i, PrimaryActorTick.TickInterval, FColor::Blue, DebugMessage);
 		}
-		
-		float CreditsPerSecond = Director.CreditGainCurve.GetRichCurve()->Eval(TotalTimeElapsed);
-		Director.CurrentCredits += CreditsPerSecond * DeltaSeconds;
-		
-		FString DebugMessage = FString::Printf(TEXT("Director %s: Total Credits {%.2f}, Next Tick Time {%.2f}"), 
-			*Director.Name.ToString(), Director.CurrentCredits, Director.NextTickTime);
-		GEngine->AddOnScreenDebugMessage(i, PrimaryActorTick.TickInterval, FColor::Blue, DebugMessage);
-	}
 	
-	// Spawn enemy maximum count check
-	if (GI->AliveAIEnemies.Num() >= MaxEnemyCount)
-	{
-		return;
-	}
-	
-	// Enemy Spawn Directors spawn time check and spawn by waves
-	for (int i = 0; i < EnemySpawnDirectorData.Num(); i++)
-	{
-		FRogueAIEnemySpawnDirectorData& Director = EnemySpawnDirectorData[i];
-		if (Director.EnemySpawnData == nullptr)
+		// Spawn enemy maximum count check
+		if (GI->AliveAIEnemies.Num() >= MaxEnemyCount)
 		{
 			return;
 		}
+	
+		// Enemy Spawn Directors spawn time check and spawn by waves
+		for (int i = 0; i < EnemySpawnDirectorData.Num(); i++)
+		{
+			FRogueAIEnemySpawnDirectorData& Director = EnemySpawnDirectorData[i];
+			if (Director.EnemySpawnData == nullptr)
+			{
+				return;
+			}
 		
-		// Spawn time check
-		if (TotalTimeElapsed < Director.NextTickTime)
-		{
-			continue;
-		}
+			// Spawn time check
+			if (TotalTimeElapsed < Director.NextTickTime)
+			{
+				continue;
+			}
 		
-		// Spawn by waves
-		if (TrySpawnEnemyByDirector(Director))
-		{
-			// Spawn succeeds, so next spawn will happen within the wave
-			Director.NextTickTime = TotalTimeElapsed + Director.TickInterval;
-		}
-		else
-		{
-			// Spawn fails, so wait for next wave
-			Director.NextTickTime = TotalTimeElapsed + Director.TimeBetweenWaves;
+			// Spawn by waves
+			if (TrySpawnEnemyByDirector(Director))
+			{
+				// Spawn succeeds, so next spawn will happen within the wave
+				Director.NextTickTime = TotalTimeElapsed + Director.TickInterval;
+			}
+			else
+			{
+				// Spawn fails, so wait for next wave
+				Director.NextTickTime = TotalTimeElapsed + Director.TimeBetweenWaves;
+			}
 		}
 	}
 }

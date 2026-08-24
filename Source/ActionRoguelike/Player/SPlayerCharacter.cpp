@@ -12,7 +12,8 @@
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 #include "ActionSystem/AttributeSet/RogueAttributeSet.h"
-#include "DefaultMovementSet/CharacterMoverComponent.h"
+#include "Player/Movement/RogueCharacterMoverComponent.h"
+#include "Player/Movement/RogueClimbMode.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
 #include "Backends/MoverStandaloneLiaison.h"
 #include "MoverDataModelTypes.h"
@@ -29,10 +30,8 @@ ASPlayerCharacter::ASPlayerCharacter()
 	CameraComp->SetupAttachment(SpringArmComp);
 
 	ActionSystemComp = CreateDefaultSubobject<URogueActionSystemComponent>("ActionSystemComp");
-
-	// Movement is driven by the Mover plugin. UCharacterMoverComponent ships with Walking/Falling/Flying
-	// modes by default. We use the Standalone liaison since this is a single-player game (no Network Prediction).
-	MoverComp = CreateDefaultSubobject<UCharacterMoverComponent>("MoverComp");
+	
+	MoverComp = CreateDefaultSubobject<URogueCharacterMoverComponent>("MoverComp");
 	MoverComp->BackendClass = UMoverStandaloneLiaisonComponent::StaticClass();
 
 	// The inherited CharacterMovementComponent is neutralized in BeginPlay so it never fights Mover for the capsule.
@@ -57,7 +56,9 @@ void ASPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Started, this, &ASPlayerCharacter::SprintStart);
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Completed, this, &ASPlayerCharacter::SprintStop);
-	
+
+	InputComp->BindAction(Input_Climb, ETriggerEvent::Started, this, &ASPlayerCharacter::ClimbToggle);
+
 	InputComp->BindAction(Input_PrimaryAttack, ETriggerEvent::Triggered, this, 
 		&ASPlayerCharacter::PrimaryAttack);
 	
@@ -296,31 +297,58 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 
 	CharacterInputs.ControlRotation = GetControlRotation();
 
-	// Rotate cached local-space intent by the camera yaw only (planar movement, matching the old behavior).
-	FRotator ControlRotYaw = CharacterInputs.ControlRotation;
-	ControlRotYaw.Pitch = 0.0f;
-	ControlRotYaw.Roll = 0.0f;
-	const FVector WorldMoveIntent = ControlRotYaw.RotateVector(CachedMoveInputIntent);
-	CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, WorldMoveIntent);
-
-	// Orient toward the movement direction (equivalent to the old bOrientRotationToMovement = true).
-	static constexpr float MoveIntentTolerance = 1e-3f;
-	if (CharacterInputs.GetMoveInput().SizeSquared() > MoveIntentTolerance)
+	if (MoverComp->IsClimbing())
 	{
-		CharacterInputs.OrientationIntent = CharacterInputs.GetMoveInput().GetSafeNormal();
+		// While climbing, hand the mode RAW stick intent (X = up/down the wall, Y = left/right along it). The climb
+		// mode maps these onto the wall plane; orientation is driven by the mode (facing the wall), not by input.
+		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, CachedMoveInputIntent);
+		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}
 	else
 	{
-		CharacterInputs.OrientationIntent = FVector::ZeroVector;
+		// On the ground/air: rotate cached local-space intent by camera yaw into world space, and orient to movement.
+		FRotator ControlRotYaw = CharacterInputs.ControlRotation;
+		ControlRotYaw.Pitch = 0.0f;
+		ControlRotYaw.Roll = 0.0f;
+		const FVector WorldMoveIntent = ControlRotYaw.RotateVector(CachedMoveInputIntent);
+		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, WorldMoveIntent);
+
+		static constexpr float MoveIntentTolerance = 1e-3f;
+		if (CharacterInputs.GetMoveInput().SizeSquared() > MoveIntentTolerance)
+		{
+			CharacterInputs.OrientationIntent = CharacterInputs.GetMoveInput().GetSafeNormal();
+		}
+		else
+		{
+			CharacterInputs.OrientationIntent = FVector::ZeroVector;
+		}
 	}
 
 	CharacterInputs.bIsJumpPressed = bIsJumpPressed;
 	CharacterInputs.bIsJumpJustPressed = bIsJumpJustPressed;
-	CharacterInputs.SuggestedMovementMode = NAME_None;
+
+	// Hand off any pending climb-toggle request as a suggested movement mode, then consume it.
+	CharacterInputs.SuggestedMovementMode = PendingSuggestedMovementMode;
+	PendingSuggestedMovementMode = NAME_None;
+
 	CharacterInputs.bUsingMovementBase = false;
 
 	// Consume the one-frame jump edge so it isn't re-applied on subsequent simulation frames.
 	bIsJumpJustPressed = false;
+}
+
+void ASPlayerCharacter::ClimbToggle(const FInputActionValue& InValue)
+{
+	if (MoverComp->IsClimbing())
+	{
+		// Toggle off: drop back into the air movement mode next input frame.
+		PendingSuggestedMovementMode = DefaultModeNames::Falling;
+	}
+	else if (MoverComp->CanStartClimbing())
+	{
+		// Toggle on: only when the coverage grid says the wall ahead is climbable.
+		PendingSuggestedMovementMode = URogueClimbMode::ModeName;
+	}
 }
 
 UCommonLegacyMovementSettings* ASPlayerCharacter::GetMoverSettings() const

@@ -35,6 +35,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category="Enemy AI Spawn")
 	int32 EnemySpawnSeed = 0;
 	
+	UPROPERTY(EditDefaultsOnly, Category="Enemy AI Spawn")
+	bool bEnableEnemySpawn = true;
+	
 	bool TrySpawnEnemyByDirector(FRogueAIEnemySpawnDirectorData& Director);
 	
 	void OnEnemySpawnEnvQueryCompleted(TSharedPtr<FEnvQueryResult> QueryResult, 

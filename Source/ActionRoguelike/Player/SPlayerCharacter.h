@@ -18,7 +18,7 @@ class UCameraComponent;
 class USpringArmComponent;
 class UInputAction;
 class UAnimMontage;
-class UCharacterMoverComponent;
+class URogueCharacterMoverComponent;
 class UCommonLegacyMovementSettings;
 struct FInputActionValue;
 struct FInputActionInstance;
@@ -46,17 +46,10 @@ public:
 	// IAbilityAttackInfoProvider
 
 	virtual FTransform GetAimingTransform_Implementation() const override;
-
-protected:
-	// IMoverInputProducerInterface: authors the input command for the next Mover simulation frame.
-	// (BlueprintNativeEvent override must use the _Implementation suffix.)
+	
+	// IMoverInputProducerInterface
+	
 	virtual void ProduceInput_Implementation(int32 SimTimeMs, FMoverInputCmdContext& InputCmdResult) override;
-
-	// Returns the shared movement settings owned by the Mover component (holds MaxSpeed, etc.). May be null before init.
-	UCommonLegacyMovementSettings* GetMoverSettings() const;
-
-	// Single writer of the Mover MaxSpeed setting: base * MovementSpeedScale attribute (which the Sprint GE boosts).
-	void RefreshMaxSpeed();
 
 protected:
 
@@ -111,7 +104,10 @@ protected:
 	
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> Input_Sprint;
-	
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> Input_Climb;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
 	TObjectPtr<URogueActionSystemComponent> ActionSystemComp;
 	
@@ -123,13 +119,16 @@ protected:
 
 	// Drives movement via the Mover plugin (replaces the neutralized CharacterMovementComponent)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
-	TObjectPtr<UCharacterMoverComponent> MoverComp;
+	TObjectPtr<URogueCharacterMoverComponent> MoverComp;
 
 	// --- Cached input, consumed by ProduceInput() each simulation frame ---
 	// Raw local-space move intent (X=forward, Y=right), rotated into world space at input-production time
 	FVector CachedMoveInputIntent = FVector::ZeroVector;
 	bool bIsJumpPressed = false;
 	bool bIsJumpJustPressed = false;
+
+	// Movement mode to hand Mover on the next input frame, used to toggle into/out of climbing. NAME_None = no request.
+	FName PendingSuggestedMovementMode = NAME_None;
 
 	void Move(const FInputActionValue& InValue);
 
@@ -145,6 +144,9 @@ protected:
 
 	void SprintStop(const FInputActionValue& InValue);
 
+	// Toggles into climbing (when facing a climbable wall) or out of it, via Mover's SuggestedMovementMode.
+	void ClimbToggle(const FInputActionValue& InValue);
+
 	void PrimaryAttack(const FInputActionValue& InValue);
 	
 	void SecondaryAttack(const FInputActionValue& InValue);
@@ -157,6 +159,11 @@ protected:
 	
 	UFUNCTION()
 	void OnHit(FGameplayTag EventTag, FRogueGameplayEventData Payload);
+	
+	UCommonLegacyMovementSettings* GetMoverSettings() const;
+	
+	void RefreshMaxSpeed();
+	
 	
 	bool bIsDead = false;
 	
