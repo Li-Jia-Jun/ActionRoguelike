@@ -13,7 +13,6 @@
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 #include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 #include "Player/Movement/RogueCharacterMoverComponent.h"
-#include "Player/Movement/RogueClimbMode.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
 #include "Backends/MoverStandaloneLiaison.h"
 #include "MoverDataModelTypes.h"
@@ -57,9 +56,7 @@ void ASPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Started, this, &ASPlayerCharacter::SprintStart);
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Completed, this, &ASPlayerCharacter::SprintStop);
 
-	InputComp->BindAction(Input_Climb, ETriggerEvent::Started, this, &ASPlayerCharacter::ClimbToggle);
-
-	InputComp->BindAction(Input_PrimaryAttack, ETriggerEvent::Triggered, this, 
+	InputComp->BindAction(Input_PrimaryAttack, ETriggerEvent::Triggered, this,
 		&ASPlayerCharacter::PrimaryAttack);
 	
 	InputComp->BindAction(Input_SecondaryAttack, ETriggerEvent::Triggered, this, 
@@ -327,28 +324,11 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 	CharacterInputs.bIsJumpPressed = bIsJumpPressed;
 	CharacterInputs.bIsJumpJustPressed = bIsJumpJustPressed;
 
-	// Hand off any pending climb-toggle request as a suggested movement mode, then consume it.
-	CharacterInputs.SuggestedMovementMode = PendingSuggestedMovementMode;
-	PendingSuggestedMovementMode = NAME_None;
-
+	CharacterInputs.SuggestedMovementMode = NAME_None;
 	CharacterInputs.bUsingMovementBase = false;
 
 	// Consume the one-frame jump edge so it isn't re-applied on subsequent simulation frames.
 	bIsJumpJustPressed = false;
-}
-
-void ASPlayerCharacter::ClimbToggle(const FInputActionValue& InValue)
-{
-	if (MoverComp->IsClimbing())
-	{
-		// Toggle off: drop back into the air movement mode next input frame.
-		PendingSuggestedMovementMode = DefaultModeNames::Falling;
-	}
-	else if (MoverComp->CanStartClimbing())
-	{
-		// Toggle on: only when the coverage grid says the wall ahead is climbable.
-		PendingSuggestedMovementMode = URogueClimbMode::ModeName;
-	}
 }
 
 UCommonLegacyMovementSettings* ASPlayerCharacter::GetMoverSettings() const

@@ -89,7 +89,12 @@ void URogueClimbMode::GenerateMove_Implementation(const FMoverTickStartData& Sta
 
 	OutProposedMove = UAirMovementUtils::ComputeControlledFreeMove(MoveParams);
 
-	// Additional velocity to keep wall contact
+	// Step B - surge: scale the along-wall velocity by the animation's cadence curve so the body moves with the
+	// anim (slow during a reach, fast during a pull). Handles the clip's two-pulse profile automatically. No-op
+	// (scale == 1) until the ClimbCadence curve is authored.
+	OutProposedMove.LinearVelocity *= MoverComp->GetClimbCadenceScale();
+
+	// Additional velocity to keep wall contact (constant, NOT surged, so contact is always maintained).
 	OutProposedMove.LinearVelocity += -WallNormal * ClimbIntoWallSpeed;
 }
 
@@ -144,13 +149,6 @@ void URogueClimbMode::SimulationTick_Implementation(const FSimulationTickParams&
 		}
 
 		CaptureFinalState(UpdatedComponent, MoveRecord, *StartingSyncState, ProposedMove.AngularVelocityDegrees, OutputSyncState);
-	}
-
-	// Exit: if the surface is gone (e.g. we climbed over the top), drop into Falling next frame.
-	const URogueCharacterMoverComponent* RogueComp = Cast<URogueCharacterMoverComponent>(MoverComp);
-	if (!RogueComp || !RogueComp->CanStartClimbing())
-	{
-		MoverComp->QueueNextMode(CommonLegacySettings->AirMovementModeName);
 	}
 }
 

@@ -127,9 +127,6 @@ protected:
 	bool bIsJumpPressed = false;
 	bool bIsJumpJustPressed = false;
 
-	// Movement mode to hand Mover on the next input frame, used to toggle into/out of climbing. NAME_None = no request.
-	FName PendingSuggestedMovementMode = NAME_None;
-
 	void Move(const FInputActionValue& InValue);
 
 	void MoveCompleted(const FInputActionValue& InValue);
@@ -143,9 +140,6 @@ protected:
 	void SprintStart(const FInputActionValue& InValue);
 
 	void SprintStop(const FInputActionValue& InValue);
-
-	// Toggles into climbing (when facing a climbable wall) or out of it, via Mover's SuggestedMovementMode.
-	void ClimbToggle(const FInputActionValue& InValue);
 
 	void PrimaryAttack(const FInputActionValue& InValue);
 	

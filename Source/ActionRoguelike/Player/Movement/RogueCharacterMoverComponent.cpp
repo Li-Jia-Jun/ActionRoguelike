@@ -3,7 +3,10 @@
 #include "RogueCharacterMoverComponent.h"
 
 #include "RogueClimbMode.h"
+#include "RogueClimbTransition.h"
 #include "GameFramework/Character.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Animation/AnimInstance.h"
 #include "CollisionShape.h"
 #include "CollisionQueryParams.h"
 #include "DrawDebugHelpers.h"
@@ -18,6 +21,9 @@ URogueCharacterMoverComponent::URogueCharacterMoverComponent()
 {
 	// Register the climbing mode
 	MovementModes.Add(URogueClimbMode::ModeName, CreateDefaultSubobject<URogueClimbMode>(TEXT("ClimbMode")));
+
+	// Register the global transition that enters/leaves climbing.
+	Transitions.Add(CreateDefaultSubobject<URogueClimbTransition>(TEXT("ClimbTransition")));
 }
 
 void URogueCharacterMoverComponent::BeginPlay()
@@ -34,6 +40,88 @@ void URogueCharacterMoverComponent::BeginPlay()
 bool URogueCharacterMoverComponent::IsClimbing() const
 {
 	return GetMovementModeName() == URogueClimbMode::ModeName;
+}
+
+namespace
+{
+	// Map a round (unit-circle) stick direction onto the unit square so full diagonals reach the blendspace
+	// corners. Preserves push magnitude: the L-infinity norm (max component) of the result equals the input
+	// length, so a half-pushed diagonal lands halfway out and nothing overshoots the axis range.
+	FVector2D CircleToSquare(const FVector2D& In)
+	{
+		const float Len = In.Size();
+		if (Len <= KINDA_SMALL_NUMBER)
+		{
+			return FVector2D::ZeroVector;
+		}
+		const FVector2D Dir = In / Len;                                          // unit direction on the circle
+		const float MaxComp = FMath::Max(FMath::Abs(Dir.X), FMath::Abs(Dir.Y));  // > 0 for a unit vector
+		return (Dir / MaxComp) * Len;                                            // push out to the square, keep length
+	}
+
+	// Round (pre-square) climb move intent in wall-relative axes (X = up/down the wall, Y = right/left), magnitude
+	// 0..1. Shared by GetClimbMoveIntent (square-mapped for the blendspace AXES) and GetClimbMoveSpeedFraction
+	// (its round magnitude for the PLAYRATE). Returns zero when there is no dominant surface.
+	FVector2D ComputeRoundClimbWallIntent(const URogueCharacterMoverComponent& Comp)
+	{
+		const FVector WallNormal = Comp.GetClimbDominantSurfaceNormal();
+		if (WallNormal.IsNearlyZero())
+		{
+			return FVector2D::ZeroVector;
+		}
+
+		// Same wall basis the climb mode uses, so the blendspace axes match the actual movement.
+		const FVector Up = Comp.GetUpDirection();
+		FVector WallUp = (Up - Up.ProjectOnToNormal(WallNormal)).GetSafeNormal();
+		if (WallUp.IsNearlyZero())
+		{
+			WallUp = Up;
+		}
+		const FVector WallRight = FVector::CrossProduct(WallNormal, WallUp).GetSafeNormal();
+
+		const FVector Intent = Comp.GetMovementIntent(); // world-space, magnitude 0-1
+		return FVector2D(FVector::DotProduct(Intent, WallUp), FVector::DotProduct(Intent, WallRight));
+	}
+}
+
+FVector2D URogueCharacterMoverComponent::GetClimbMoveIntent() const
+{
+	// The intent is a round (unit-circle) direction, but the blendspace is a square whose diagonal clips sit at
+	// the corners. Remap so full diagonals reach the corners; without this they cap at 0.707 and never fully play.
+	return CircleToSquare(ComputeRoundClimbWallIntent(*this));
+}
+
+float URogueCharacterMoverComponent::GetClimbMoveSpeedFraction() const
+{
+	// Round (pre-square) push amount, direction-independent: 1 at any full push, matching the body's constant
+	// climb speed. Drives the blendspace PLAYRATE (Step A). Deliberately NOT |GetClimbMoveIntent()|, whose square
+	// mapping reaches sqrt(2) on diagonals and would make diagonal climbing play too fast (foot skate).
+	return FMath::Min(1.0f, ComputeRoundClimbWallIntent(*this).Size());
+}
+
+float URogueCharacterMoverComponent::GetClimbCadenceScale() const
+{
+	if (const ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()))
+	{
+		if (const USkeletalMeshComponent* Mesh = OwnerCharacter->GetMesh())
+		{
+			if (const UAnimInstance* AnimInstance = Mesh->GetAnimInstance())
+			{
+				// Returns true only if the curve is present in the current pose; default to 1 (no surge) otherwise
+				// so climbing behaves normally until the cadence curve is present on the clips.
+				float CadenceValue = 1.0f;
+				if (AnimInstance->GetCurveValue(ClimbCadenceCurveName, CadenceValue))
+				{
+					// Normalize an absolute-speed curve (cm/s) into a ~mean-1 multiplier; 0 means it's already a multiplier.
+					const float Normalized = (ClimbCadenceReferenceSpeed > 0.0f) ? (CadenceValue / ClimbCadenceReferenceSpeed) : CadenceValue;
+					// Blend toward a flat 1.0 to tame surge amplitude without changing the average speed.
+					return FMath::Lerp(1.0f, Normalized, ClimbSurgeStrength);
+				}
+			}
+		}
+	}
+
+	return 1.0f;
 }
 
 void URogueCharacterMoverComponent::HandlePreSimulationTick(const FMoverTimeStep& TimeStep, const FMoverInputCmdContext& InputCmd)
@@ -55,9 +143,9 @@ void URogueCharacterMoverComponent::SweepAndStoreWallHits()
 	
 	const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(ClimbDetectionCapsuleRadius, ClimbDetectionCapsuleHalfHeight);
 	const FVector Forward = Updated->GetForwardVector();
-	const FVector Start = Updated->GetComponentLocation() + Forward * ClimbDetectionForwardOffset;
-	const FVector End = Start + Forward; // Sweep slightly ahead of the character
-
+	FVector Start = Updated->GetComponentLocation() + Forward * ClimbDetectionForwardOffset;
+	FVector End = Start + Forward; // Sweep slightly ahead of the character
+	
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(GetOwner());
 
@@ -91,6 +179,10 @@ void URogueCharacterMoverComponent::SweepAndStoreWallHits()
 
 void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 {
+	// Keep the previous dominant plane so we can smooth toward the new grid average (damps curved-surface jitter).
+	const FVector PrevNormal = ClimbDominantSurfaceNormalCache;
+	const FVector PrevLocation = ClimbDominantSurfaceLocationCache;
+
 	// Reset cached outputs each refresh.
 	bFacingClimbableSurface = false;
 	ClimbDominantSurfaceNormalCache = FVector::ZeroVector;
@@ -199,8 +291,22 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 
 	if (ValidCount > 0)
 	{
-		ClimbDominantSurfaceNormalCache = NormalSum.GetSafeNormal();
-		ClimbDominantSurfaceLocationCache = PointSum / ValidCount;
+		const FVector TargetNormal = NormalSum.GetSafeNormal();
+		const FVector TargetLocation = PointSum / ValidCount;
+
+		// Snap on the first frame we (re)acquire a surface (no prior value to interp from), otherwise ease toward
+		// the new grid average to damp per-frame jitter on curved surfaces.
+		const float DeltaSeconds = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+		if (ClimbNormalSmoothingSpeed <= 0.0f || PrevNormal.IsNearlyZero() || DeltaSeconds <= 0.0f)
+		{
+			ClimbDominantSurfaceNormalCache = TargetNormal;
+			ClimbDominantSurfaceLocationCache = TargetLocation;
+		}
+		else
+		{
+			ClimbDominantSurfaceNormalCache = FMath::VInterpTo(PrevNormal, TargetNormal, DeltaSeconds, ClimbNormalSmoothingSpeed).GetSafeNormal();
+			ClimbDominantSurfaceLocationCache = FMath::VInterpTo(PrevLocation, TargetLocation, DeltaSeconds, ClimbNormalSmoothingSpeed);
+		}
 	}
 
 	// Entry gate 1 - coverage: enough of the GRIP (upper) band is backed by surface. (Lower rows may hang).

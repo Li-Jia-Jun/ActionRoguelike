@@ -14,7 +14,7 @@ class UCommonLegacyMovementSettings;
  * GenerateMove maps the player's raw stick input onto the wall (up/right along the surface), orients the
  * character to face the wall, and biases slightly into it to keep contact. The wall plane comes from the
  * URogueCharacterMoverComponent's cached dominant surface normal. The mode auto-exits to Falling when the
- * surface is lost (CanStartClimbing() becomes false, e.g. climbing over the top).
+ * surface is lost (CanClimbNow() becomes false, e.g. climbing over the top).
  */
 UCLASS(MinimalAPI, Blueprintable, BlueprintType)
 class URogueClimbMode : public UBaseMovementMode
