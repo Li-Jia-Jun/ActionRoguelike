@@ -174,15 +174,23 @@ Inertialization = an `Inertialization` node downstream of the `DefaultSlot` + th
 ## Tuning knobs
 `MinHorizontalDegreesToStartClimbing`, grid dimensions & footprint (width/height/reach), `MinCoverageRatio`, normal-consistency angle, hang-blend smoothing rate, per-foot IK search radius + interp/hysteresis, tuck offset.
 
-## Build order
-1. **Sustained climb** — coverage grid, state classification, dominant-plane orient + IK (current focus).
-2. **Mantle** — first authored traversal; completes the climb-a-wall loop and builds the reusable traversal skeleton.
-3. **Corner turns** — inner then outer; same skeleton + corner-classification side probes + authored clips.
+## Status & roadmap
 
-Edge-clamp (don't move off a side edge) is a cheap safety add-on to step 1; ledge shimmy and stamina/UI are later polish.
+**Done**
+1. **Sustained climb** — detection sweep → 3×5 coverage grid → dominant-plane orient; custom `URogueClimbMode` + contextual entry/exit transition.
+2. **Climb anim sync** — 8-dir blendspace, playrate sync (Step A) + per-clip velocity surge (Step B), round→square input remap.
+3. **Mantle top-out** — first authored traversal: two-phase motion-warped root-motion montage → Walking; established the reusable traversal skeleton.
+
+**Next — big milestones, roughly ordered**
+4. **Lower-body hang blend** — drive the already-computed `LowerBodySupport` scalar into an anim blend so climbing over a lip eases into a dangle (the sim scalar exists; it just isn't wired to anim yet).
+5. **Per-foot / per-hand IK (Control Rig)** — dedicated limb probes + two-bone IK plant with interp/hysteresis, plus the floating-limb procedural tuck fallback (design lives in *Per-limb refinement* + *Procedural tuck* above).
+6. **Corner turns** — inner then outer; reuse the mantle traversal skeleton + side-probe corner classification (concave vs convex) + authored clips.
+7. **Climb feel polish** — wall-distance vs into-wall bias; **edge-clamp** (don't walk off a side edge — a cheap safety add-on).
+8. **Uneven surfaces** — climb across surface intersections / non-planar geometry.
+
+**Later polish** — ledge shimmy; stamina + UI.
 
 ## TODO
-
-- Climb on uneven surfaces (especially on surfaces intersections).
+- Climb on uneven surfaces (especially surface intersections) — milestone 8 above.
 
 
