@@ -123,6 +123,54 @@ The clip drives along-wall *magnitude* only; the mode keeps *direction* (wall pl
 - **Corner turns:** a side column misses → side probe classifies **inner** (concave, perpendicular wall also hits) vs **outer** (convex, face wraps away) → matching clip warped to the new face → resume climb on the new dominant normal.
 - Reference: UE5 **Game Animation Sample** traversal system (chooser + Motion Warping), not a BOTW tutorial.
 
+## Mantle — implementation (done)
+
+Top-out from climbing: push **up** at a ledge → an authored **root-motion** montage, **motion-warped** onto the real lip + landing, ending in **Walking** on top. Built as a distinct `URogueMantleMode` + `URogueMantleTransition`, so `IsClimbing()` is false during it → the climb-exit-to-Falling *fling* can't fire. Motion = a `FLayeredMove_AnimRootMotion` (`OverrideAll`, self-terminating when the montage stops). MotionWarping works on Mover **without CMC**: `UMoverComponent` auto-wires a `UMotionWarpingMoverAdapter` when the actor owns a `UMotionWarpingComponent`. Completion is read from the sync state — `!LayeredMoves.HasMove<FLayeredMove_AnimRootMotion>()` → `GroundMovementModeName` (Walking).
+
+### Two-phase warping — trace the corner, don't cut it
+
+**Problem.** One warp target (the landing) makes SkewWarp drive the root in a straight diagonal from grab → landing, which cuts *through* the wall corner, so the capsule/feet clip the lip.
+
+**Fix.** Two named warp windows, each with its own target, so the montage goes up *then* over:
+
+```
+MantleUp      → edge/lip   (landing pulled back to the wall face by MantleForwardReach)
+MantleForward → landing    (the walkable top point)
+```
+
+`BeginMantle()` sets both from the probe (`AddOrUpdateWarpTargetFromTransform`); the montage carries two SkewWarp windows named to match.
+
+**The part to remember — SkewWarp warps the ENDPOINT, not the path.** Each window forces only its *end* onto the target; the in-between path is the clip's own root motion, skewed. So forward motion still bleeds into the up-window unless the split is early enough — the primary lever is the *window boundary* (move it earlier), secondarily `MantleEdgeForward` (forward offset of the MantleUp target).
+
+**Overshoot caveat.** A very short window with no max-speed clamp overshoots (feet end above the lip): the window must apply *all* remaining root translation within its duration → short window ⇒ huge per-frame velocity ⇒ discrete-step / exit-momentum overshoot. Fix = longer window (warp becomes a small correction, scale ≈ 1) or clamp velocity.
+
+### Root motion: the UE4→UE5 retarget drops it (the mesh-drift bug)
+
+**Symptom.** During warping the mesh drifts *out* of the capsule; the detection capsule still lands on target. `HasRootMotion()` reads true and the capsule moves — but the mesh doesn't ride it.
+
+**Root cause.** The climb pack is UE4 Manny retargeted to UE5 Manny, and the retarget **baked the travel into the body with the root bone flat** — i.e. *no real root motion*. The capsule only moved because **SkewWarp ADDS translation when the anim supplies none**, so there was nothing for the root-lock to hold the mesh to.
+
+**Tell.** In the IK Retargeter the **"dotted line"** (root trajectory) is *missing*, vs present on a clip with real root motion (e.g. Mover's `VaultOver`).
+
+**Fix.** IK Retargeter root-motion op → **Root Motion Source = "Generate from Target Pelvis"** (not "Copy from Source Root", which gives a flat/straight line). Pelvis source `Root` → a straight "up" line; `Pelvis` → the real up-then-forward arc (minor weight-shift-back that warping hides).
+
+**Related finding — the root lock is an ANIM-SYSTEM step, not CMC.** The mesh rides the capsule via `FRootMotionReset` in `DecompressPose`, gated by `Montage->HasRootMotion() && RootMotionMode != NoRootMotionExtraction`; CMC only *consumes* the delta. So a CMC-less Mover character keeps the lock **for free** as long as the AnimBP's Root Motion Mode isn't "No Root Motion Extraction" *and* the clip has real root motion. `PushDisableRootMotion` disables only the movement-facing extraction (prevents double-apply), not the visual lock — so `ForceRootLock` / `IgnoreRootMotion` / `RootMotionAttribute` all failed here for the same reason: no real root motion to lock.
+
+### End-pose seam — mantle → combat idle
+
+**Problem.** The mantle clip settles into a tall, arms-down "stand" far from the aim-idle, so handing back to the locomotion state machine *popped* (a visible cross-fade between two far-apart poses).
+
+**Fix — three orthogonal levers together**, each closing a different gap:
+
+```
+cut the montage tail   → shrinks the pose distance at the source
+Inertialization        → residual cross-fade is velocity-continuous, not a linear lerp
+foot IK ease in/out    → pins ground contact across the handoff
+                         (inertialization blends the whole pose, not contacts)
+```
+
+Inertialization = an `Inertialization` node downstream of the `DefaultSlot` + the montage's **Blend Out → Inertialization** (same overshoot caveat as warping if the pose gap is large and the blend time tiny). Extra levers: montage Blend Out **Trigger Time** earlier so the tall settle overlaps idle; a per-bone **Blend Profile**. This is the **reusable montage→locomotion recipe** for every authored traversal (corner turns next).
+
 ## Tuning knobs
 `MinHorizontalDegreesToStartClimbing`, grid dimensions & footprint (width/height/reach), `MinCoverageRatio`, normal-consistency angle, hang-blend smoothing rate, per-foot IK search radius + interp/hysteresis, tuck offset.
 
