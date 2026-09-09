@@ -133,6 +133,8 @@ The clip drives along-wall *magnitude* only; the mode keeps *direction* (wall pl
 
 Edge-clamp (don't move off a side edge) is a cheap safety add-on to step 1; ledge shimmy and stamina/UI are later polish.
 
-## New TODO
+## TODO
 
-Hand IK, limit upper body rotation.
+- Climb on uneven surfaces (especially on surfaces intersections).
+
+

@@ -16,6 +16,7 @@
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
 #include "Backends/MoverStandaloneLiaison.h"
 #include "MoverDataModelTypes.h"
+#include "MotionWarpingComponent.h"
 
 ASPlayerCharacter::ASPlayerCharacter()
 {
@@ -32,6 +33,9 @@ ASPlayerCharacter::ASPlayerCharacter()
 	
 	MoverComp = CreateDefaultSubobject<URogueCharacterMoverComponent>("MoverComp");
 	MoverComp->BackendClass = UMoverStandaloneLiaisonComponent::StaticClass();
+
+	// Present before UMoverComponent::InitializeComponent, which auto-wires the Mover motion-warping adapter to it.
+	MotionWarpingComp = CreateDefaultSubobject<UMotionWarpingComponent>("MotionWarpingComp");
 
 	// The inherited CharacterMovementComponent is neutralized in BeginPlay so it never fights Mover for the capsule.
 	bUseControllerRotationYaw = false;
@@ -299,6 +303,13 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 		// While climbing, hand the mode RAW stick intent (X = up/down the wall, Y = left/right along it). The climb
 		// mode maps these onto the wall plane; orientation is driven by the mode (facing the wall), not by input.
 		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, CachedMoveInputIntent);
+		CharacterInputs.OrientationIntent = FVector::ZeroVector;
+	}
+	else if (MoverComp->IsMantling())
+	{
+		// The mantle's root-motion layered move (OverrideAll) owns motion + orientation; feed nothing so a stray
+		// stick or camera turn can't perturb it.
+		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, FVector::ZeroVector);
 		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}
 	else

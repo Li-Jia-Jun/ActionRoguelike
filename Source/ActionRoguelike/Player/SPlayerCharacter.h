@@ -20,6 +20,7 @@ class UInputAction;
 class UAnimMontage;
 class URogueCharacterMoverComponent;
 class UCommonLegacyMovementSettings;
+class UMotionWarpingComponent;
 struct FInputActionValue;
 struct FInputActionInstance;
 struct FRogueHealthAttribute;
@@ -120,6 +121,10 @@ protected:
 	// Drives movement via the Mover plugin (replaces the neutralized CharacterMovementComponent)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
 	TObjectPtr<URogueCharacterMoverComponent> MoverComp;
+
+	// Motion Warping for authored traversals (e.g. the mantle). UMoverComponent auto-wires its adapter to this.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
+	TObjectPtr<UMotionWarpingComponent> MotionWarpingComp;
 
 	// --- Cached input, consumed by ProduceInput() each simulation frame ---
 	// Raw local-space move intent (X=forward, Y=right), rotated into world space at input-production time

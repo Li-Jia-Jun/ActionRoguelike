@@ -5,6 +5,9 @@
 #include "DefaultMovementSet/CharacterMoverComponent.h"
 #include "RogueCharacterMoverComponent.generated.h"
 
+class UAnimMontage;
+class UMotionWarpingComponent;
+
 /** One sample of the climb coverage grid: a short forward probe at one grid cell. */
 struct FClimbSurfaceSample
 {
@@ -30,6 +33,10 @@ class ACTIONROGUELIKE_API URogueCharacterMoverComponent : public UCharacterMover
 public:
 	URogueCharacterMoverComponent();
 
+	// Registers our custom modes/transitions before the base builds its state machine (see the .cpp for why this is
+	// done here rather than in the constructor).
+	virtual void InitializeComponent() override;
+
 	virtual void BeginPlay() override;
 	
 	const TArray<FHitResult>& GetCurrentWallHits() const { return CurrentWallHits; }
@@ -44,7 +51,7 @@ public:
 	// True while the climb movement mode is the active movement mode.
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsClimbing() const;
-
+	
 	// Climb move intent in wall-relative axes for the climb blendspace: X = up(+)/down(-) the wall, Y = right(+)/left(-).
 	// Derived from GetMovementIntent() projected onto the wall basis, then circle->square remapped so full diagonals
 	// reach the blendspace corners. Feed this to the blendspace AXES. Meaningful while climbing.
@@ -84,6 +91,32 @@ public:
 	// Starts the contextual re-entry cooldown from the given sim time (called when leaving climb).
 	void BeginClimbReentryCooldown(double SimTimeMs) { ClimbReentryUnblockSimTimeMs = SimTimeMs + ClimbReentryCooldownSeconds * 1000.0; }
 
+	// --- Mantle (climb top-out) ---
+
+	// True while the mantle movement mode is the active movement mode.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Mantle")
+	bool IsMantling() const;
+
+	// True when the mantle probe found a valid ledge + landing this tick (refreshed while climbing).
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Mantle")
+	bool IsMantleLedgeAvailable() const { return bMantleLedgeAvailable; }
+
+	// World transform the mantle warps to: capsule center on top of the ledge + facing away from the wall.
+	// Meaningful when IsMantleLedgeAvailable() is true.
+	FTransform GetMantleLandingTransform() const { return MantleLandingTransformCache; }
+
+	// Minimum wall-up stick intent (X) required to start the mantle.
+	float GetMantleUpIntentThreshold() const { return MantleUpIntentThreshold; }
+
+	UAnimMontage* GetMantleMontage() const { return MantleMontage; }
+
+	UMotionWarpingComponent* GetMotionWarping() const { return MotionWarpingComp; }
+
+	// Plays the mantle montage on the mesh, queues the anim-root-motion layered move, and sets the two warp targets
+	// (edge then landing) from the cached probe result. Called by URogueMantleTransition::Trigger on entry. Returns
+	// false (mantle skipped) if the montage/warp component is missing.
+	bool BeginMantle();
+
 protected:
 
 	UFUNCTION()
@@ -92,6 +125,10 @@ protected:
 	void SweepAndStoreWallHits();
 	
 	void RefreshClimbSurfaceInfo();
+
+	// Up-and-over probe (run while climbing): confirms the wall face has ended, finds the walkable top, checks
+	// capsule fit, and caches the landing transform. Populates bMantleLedgeAvailable / MantleLandingTransformCache.
+	void RefreshMantleProbe();
 
 	bool IsSurfaceClimbable(float SteepnessDotProduct) const;
 	
@@ -111,6 +148,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Detection", meta = (ForceUnits = "degrees"))
 	float MinHorizontalDegreesToStartClimbing = 25.0f;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Detection", meta = (ForceUnits = "cm"))
+	float OnClimbAdditionalOffset = 20.0f;
+	
 	// --- Coverage grid (climbability validation) ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
@@ -186,7 +226,57 @@ protected:
 	// 0 = no surge (constant speed), 1 = full curve. Does NOT change the average speed (set the reference first).
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Cadence", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ClimbSurgeStrength = 1.0f;
-	
+
+	// --- Mantle (climb top-out) ---
+	// The ledge-height BAND below is the single authority for BOTH the gameplay gate and the probe's vertical reach:
+	// RefreshMantleProbe derives the overhead/down traces from it, so detection reach and the height policy can't
+	// drift apart (retuning the band moves the trigger window; there is no separate probe-height knob to keep in sync).
+
+	// Ledge height (top of the ledge above the character's FEET) must be within [min, max] to allow a mantle.
+	// Min rejects trivial steps / surfaces at or below the feet; max rejects ledges too high to top out onto.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleMinLedgeHeightFromFeet = 170.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleMaxLedgeHeightFromFeet = 220.0f;
+
+	// How far beyond the wall face (plus capsule radius) to search for the top surface.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleForwardReach = 55.0f;
+
+	// Forward offset of the "up" (MantleUp) warp target from the character's feet, at ledge height. Small = phase 1 is
+	// mostly straight UP to just inside the lip; larger pushes the edge target out over the lip (more forward in phase 1).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleEdgeForward = 10.0f;
+
+	// Min dot(landingNormal, up) for the top to count as walkable (cosine of the max landing slope).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MantleMinWalkableDot = 0.7f;
+
+	// Small lift applied to the landing (capsule center / warp target) so the character clears the lip.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleLandingSkin = 4.0f;
+
+	// Min wall-up stick intent (X) required to trigger the mantle.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MantleUpIntentThreshold = 0.6f;
+
+	// Authored ROOT-MOTION mantle montage. Author TWO Motion Warping (SkewWarp) windows: the "pull up" section
+	// targeting MantleUpWarpTargetName, then the "step over" section targeting MantleForwardWarpTargetName.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
+	TObjectPtr<UAnimMontage> MantleMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
+	float MantleMontagePlayRate = 1.0f;
+
+	// Warp-target names on the montage's two Motion Warping windows. "Up" targets the lip/edge (drives straight up the
+	// wall face), "Forward" targets the landing on top (steps over) - the two-phase path avoids clipping the wall corner.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
+	FName MantleUpWarpTargetName = FName("MantleUp");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
+	FName MantleForwardWarpTargetName = FName("MantleForward");
+
 	TArray<FHitResult> CurrentWallHits;
 	
 	FCollisionQueryParams ClimbQueryParams;
@@ -202,6 +292,15 @@ protected:
 
 	// Sim time (ms) until which contextual climb re-entry is blocked. Set by BeginClimbReentryCooldown on exit.
 	double ClimbReentryUnblockSimTimeMs = 0.0;
+
+	// --- Cached mantle-probe state (refreshed each pre-sim-tick while climbing) ---
+	bool bMantleLedgeAvailable = false;
+	FTransform MantleLandingTransformCache = FTransform::Identity;   // "forward" warp target: the landing on top
+	FTransform MantleEdgeTransformCache = FTransform::Identity;      // "up" warp target: the lip/edge at the wall face
+
+	// Owner's warping component (found in BeginPlay); drives the mantle's motion-warp alignment to the ledge.
+	UPROPERTY(Transient)
+	TObjectPtr<UMotionWarpingComponent> MotionWarpingComp;
 
 	// Anim-facing coverage scalars in [0,1]; read by the AnimBP to drive hang/lean blends.
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing", meta = (AllowPrivateAccess = "true"))
