@@ -2,6 +2,7 @@
 
 #include "RogueMantleMode.h"
 
+#include "RogueCharacterMoverComponent.h"
 #include "MoverComponent.h"
 #include "MoverDataModelTypes.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
@@ -55,9 +56,30 @@ void URogueMantleMode::SimulationTick_Implementation(const FSimulationTickParams
 	const bool bIsOrientationChanging = !StartingOrient.Equals(TargetOrient);
 
 	FQuat TargetOrientQuat = TargetOrient.Quaternion();
-	if (CommonLegacySettings->bShouldRemainVertical)
+
+	// Orientation: HOLD the wall tilt inherited from the climb until the montage signals the upright blend, then ease to
+	// vertical (instead of snapping). ShouldMantleBlendUpright() is true immediately when no gate event tag is set (the
+	// pre-notify behavior); when the tag is set it flips only after the montage fires it, so the start of the montage
+	// matches the tilted climb pose and the character straightens on the authored frame.
+	const URogueCharacterMoverComponent* RogueMoverComp = Cast<URogueCharacterMoverComponent>(MoverComp);
+	if (RogueMoverComp && !RogueMoverComp->ShouldMantleBlendUpright())
 	{
-		TargetOrientQuat = FRotationMatrix::MakeFromZX(MoverComp->GetUpDirection(), TargetOrientQuat.GetForwardVector()).ToQuat();
+		// Before the event: keep the tilted orientation carried over from the climb (no upright-ing yet).
+		TargetOrientQuat = StartingOrient.Quaternion();
+	}
+	else
+	{
+		// Vertical target, facing preserved (MakeFromZX keeps TargetOrient's forward), eased in from the tilt so the
+		// climb->mantle handoff on a tilted wall doesn't pop the capsule (and the mesh riding it) upright in one frame.
+		if (CommonLegacySettings->bShouldRemainVertical)
+		{
+			TargetOrientQuat = FRotationMatrix::MakeFromZX(MoverComp->GetUpDirection(), TargetOrientQuat.GetForwardVector()).ToQuat();
+		}
+		const float BlendSpeed = RogueMoverComp ? RogueMoverComp->GetMantleUprightBlendSpeed() : 0.0f;
+		if (BlendSpeed > 0.0f)
+		{
+			TargetOrientQuat = FMath::QInterpTo(StartingOrient.Quaternion(), TargetOrientQuat, DeltaSeconds, BlendSpeed);
+		}
 	}
 
 	FHitResult Hit(1.0f);

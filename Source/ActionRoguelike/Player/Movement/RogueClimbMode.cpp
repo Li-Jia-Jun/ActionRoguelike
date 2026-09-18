@@ -122,10 +122,24 @@ void URogueClimbMode::SimulationTick_Implementation(const FSimulationTickParams&
 		const float DeltaSeconds = Params.TimeStep.StepMs * 0.001f;
 		const FRotator StartingOrient = StartingSyncState->GetOrientation_WorldSpace();
 		const FRotator TargetOrient = UMovementUtils::ApplyAngularVelocityToRotator(StartingOrient, ProposedMove.AngularVelocityDegrees, DeltaSeconds);
-		const bool bIsOrientationChanging = !StartingOrient.Equals(TargetOrient);
-	
+		bool bIsOrientationChanging = !StartingOrient.Equals(TargetOrient);
+
 		FQuat TargetOrientQuat = TargetOrient.Quaternion();
-		if (CommonLegacySettings->bShouldRemainVertical)
+
+		const URogueCharacterMoverComponent* RogueMoverComp = Cast<URogueCharacterMoverComponent>(MoverComp);
+		const FVector WallNormal = RogueMoverComp ? RogueMoverComp->GetClimbDominantSurfaceNormal() : FVector::ZeroVector;
+
+		if (RogueMoverComp && RogueMoverComp->ShouldAlignToClimbSurface() && !WallNormal.IsNearlyZero())
+		{
+			// Lie against the wall: up-axis follows the wall's up-slope, forward faces into the wall. WallNormal is
+			// smoothed upstream (ClimbNormalSmoothingSpeed), so this eases as the surface changes. Vertical wall -> WallUp == world up.
+			const FVector UpDir = MoverComp->GetUpDirection();
+			FVector WallUp = (UpDir - UpDir.ProjectOnToNormal(WallNormal)).GetSafeNormal();
+			if (WallUp.IsNearlyZero()) { WallUp = UpDir; }
+			TargetOrientQuat = FRotationMatrix::MakeFromZX(WallUp, -WallNormal).ToQuat();
+			bIsOrientationChanging = bIsOrientationChanging || !StartingOrient.Quaternion().Equals(TargetOrientQuat, KINDA_SMALL_NUMBER);
+		}
+		else if (CommonLegacySettings->bShouldRemainVertical)
 		{
 			// Correct intent orient so it stays vertical up (z-up)
 			TargetOrientQuat = FRotationMatrix::MakeFromZX(MoverComp->GetUpDirection(), TargetOrientQuat.GetForwardVector()).ToQuat();

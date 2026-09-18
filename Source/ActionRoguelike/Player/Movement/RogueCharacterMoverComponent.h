@@ -3,6 +3,8 @@
 #pragma once
 
 #include "DefaultMovementSet/CharacterMoverComponent.h"
+#include "GameplayTagContainer.h"
+#include "ActionSystem/GameplayEvent/FRogueGameplayEventData.h"
 #include "RogueCharacterMoverComponent.generated.h"
 
 class UAnimMontage;
@@ -72,6 +74,9 @@ public:
 
 	// Dominant climb plane in world space. Meaningful when CanClimbNow() is true.
 	FVector GetClimbDominantSurfaceNormal() const { return ClimbDominantSurfaceNormalCache; }
+
+	// True = the capsule tilts to lie against the climb surface (up follows the wall's up-slope) instead of staying world-vertical.
+	bool ShouldAlignToClimbSurface() const { return bAlignToClimbSurface; }
 	FVector GetClimbDominantSurfaceLocation() const { return ClimbDominantSurfaceLocationCache; }
 
 	// Per-sample grid results, row-major (row 0 = bottom). For future per-limb IK / debug.
@@ -108,6 +113,13 @@ public:
 	// Minimum wall-up stick intent (X) required to start the mantle.
 	float GetMantleUpIntentThreshold() const { return MantleUpIntentThreshold; }
 
+	// Interp speed the mantle uses to ease its capsule from the climb's wall-tilted orientation back to world-vertical.
+	float GetMantleUprightBlendSpeed() const { return MantleUprightBlendSpeed; }
+
+	// True once the mantle should ease to vertical: immediately when no gate event tag is set, otherwise only after the
+	// montage has fired MantleUprightBlendEventTag (an anim "Send Gameplay Event" notify routed through the action system).
+	bool ShouldMantleBlendUpright() const { return !MantleUprightBlendEventTag.IsValid() || bMantleUprightBlendRequested; }
+
 	UAnimMontage* GetMantleMontage() const { return MantleMontage; }
 
 	UMotionWarpingComponent* GetMotionWarping() const { return MotionWarpingComp; }
@@ -121,6 +133,11 @@ protected:
 
 	UFUNCTION()
 	void HandlePreSimulationTick(const FMoverTimeStep& TimeStep, const FMoverInputCmdContext& InputCmd);
+
+	// Action-system listener (bound in BeginPlay): starts the mantle upright blend when the montage fires
+	// MantleUprightBlendEventTag. Sets bMantleUprightBlendRequested; consumed by ShouldMantleBlendUpright().
+	UFUNCTION()
+	void OnMantleUprightBlendEvent(FGameplayTag EventTag, FRogueGameplayEventData Payload);
 	
 	void SweepAndStoreWallHits();
 	
@@ -130,8 +147,19 @@ protected:
 	// capsule fit, and caches the landing transform. Populates bMantleLedgeAvailable / MantleLandingTransformCache.
 	void RefreshMantleProbe();
 
+	// Precisely localizes the lip (top of the near face) at mantle COMMIT, decoupled from the landing: a binary-searched,
+	// laterally-sampled forward-ray scan up the wall face. Writes a feet warp transform for the "up" phase. Returns false
+	// if no lip is found (caller falls back to the cheap probe's cached edge). Cost = Iterations x LateralSamples traces, once.
+	bool ComputePreciseMantleEdge(FTransform& OutEdge) const;
+
 	bool IsSurfaceClimbable(float SteepnessDotProduct) const;
-	
+
+	// Upward sampling bias applied while climbing (hands reach high, legs curl), scaled by OnClimbAdditionalOffset
+	// and projected onto the given wall plane so it follows the wall's up-slope instead of world up. On a back-tilted
+	// wall the surface recedes as it rises, so a pure world-up shift would walk the sweep/grid off the surface;
+	// projecting keeps them on it at any tilt (== world up on a vertical wall). Pass the last-known plane normal.
+	FVector GetClimbSampleUpBias(const FVector& PlaneNormal) const;
+
 	bool EyeHeightTrace(const float TraceDistance) const;
 
 	// --- Detection tuning ---
@@ -150,7 +178,13 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Detection", meta = (ForceUnits = "cm"))
 	float OnClimbAdditionalOffset = 20.0f;
-	
+
+	// While climbing, tilt the capsule (and thus the mesh + detection) to lie against the surface: its up-axis
+	// follows the wall's up-slope, its forward faces into the wall. On a vertical wall this is a no-op; on a
+	// slanted wall it reads far better than standing bolt-upright. Toggle off to keep the old world-vertical pose.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Detection")
+	bool bAlignToClimbSurface = true;
+
 	// --- Coverage grid (climbability validation) ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
@@ -244,22 +278,57 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
 	float MantleForwardReach = 55.0f;
 
-	// Forward offset of the "up" (MantleUp) warp target from the character's feet, at ledge height. Small = phase 1 is
-	// mostly straight UP to just inside the lip; larger pushes the edge target out over the lip (more forward in phase 1).
+	// How far below the ledge to search for the landing surface.
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
-	float MantleEdgeForward = 10.0f;
+	float MantleDownReach = 100.0f;
+	
+	// Backward offset of the MantleUp warp target (cyan sphere)
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleEdgeBackward = 10.0f;
+	
+	// Up offset of the Mantle warp target (cyan sphere)
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
+	float MantleEdgeUp = 10.0f;
+
+	// --- Precise lip scan (runs ONCE when the mantle commits, not per-frame) ---
+	// Perf<->precision: binary-search iterations that localize the lip height along the wall face. Each iteration
+	// halves the remaining error (band / 2^n), at one extra trace per lateral sample. Lower = cheaper/coarser.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "1", ClampMax = "12"))
+	int32 MantleLipScanIterations = 6;
+
+	// Perf<->precision: lateral rays across the grab width; the lip is averaged over them (smooths a ragged/slanted
+	// lip and rejects a single stray hit). 1 = one centre ray (cheapest). Total scan = Iterations x LateralSamples traces.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "1", ClampMax = "9"))
+	int32 MantleLipLateralSamples = 3;
+
+	// Half-width of the lateral spread for the lip samples (ignored when MantleLipLateralSamples == 1).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float MantleLipScanHalfWidth = 20.0f;
 
 	// Min dot(landingNormal, up) for the top to count as walkable (cosine of the max landing slope).
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MantleMinWalkableDot = 0.7f;
 
-	// Small lift applied to the landing (capsule center / warp target) so the character clears the lip.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm"))
-	float MantleLandingSkin = 4.0f;
+	// Fit test: how high above the landing the capsule starts before sweeping straight down to find its rest. Must clear
+	// the walk surface's uphill slope rise within the capsule footprint (~CapR*tan(maxSlope)) so the sweep starts in free
+	// space; the sweep also travels this far below, so a too-small value can miss a low rest. Bigger = safer, slightly costlier.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float MantleFitSweepClearance = 40.0f;
 
 	// Min wall-up stick intent (X) required to trigger the mantle.
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MantleUpIntentThreshold = 0.6f;
+
+	// How fast the mantle eases its capsule from the climb's wall-tilted orientation back to world-vertical (interp
+	// speed; higher = snappier). Removes the orientation pop at the climb->mantle handoff on tilted walls. 0 = snap.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle", meta = (ClampMin = "0.0"))
+	float MantleUprightBlendSpeed = 8.0f;
+
+	// Gameplay event tag the mantle montage fires to START the upright blend (routed through the action system's
+	// GameplayEventReceivedDelegate). Leave UNSET to blend immediately at mantle entry (the pre-notify behavior); set it
+	// to the montage's "Send Gameplay Event" notify tag to hold the wall tilt until that authored point in the animation.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
+	FGameplayTag MantleUprightBlendEventTag;
 
 	// Authored ROOT-MOTION mantle montage. Author TWO Motion Warping (SkewWarp) windows: the "pull up" section
 	// targeting MantleUpWarpTargetName, then the "step over" section targeting MantleForwardWarpTargetName.
@@ -297,6 +366,10 @@ protected:
 	bool bMantleLedgeAvailable = false;
 	FTransform MantleLandingTransformCache = FTransform::Identity;   // "forward" warp target: the landing on top
 	FTransform MantleEdgeTransformCache = FTransform::Identity;      // "up" warp target: the lip/edge at the wall face
+
+	// Set by OnMantleUprightBlendEvent when the montage fires the upright-blend event; reset per mantle in BeginMantle.
+	// Gates the mantle mode's ease-to-vertical (see ShouldMantleBlendUpright).
+	bool bMantleUprightBlendRequested = false;
 
 	// Owner's warping component (found in BeginPlay); drives the mantle's motion-warp alignment to the ledge.
 	UPROPERTY(Transient)

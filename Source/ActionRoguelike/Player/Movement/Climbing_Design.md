@@ -125,24 +125,36 @@ The clip drives along-wall *magnitude* only; the mode keeps *direction* (wall pl
 
 ## Mantle — implementation (done)
 
-Top-out from climbing: push **up** at a ledge → an authored **root-motion** montage, **motion-warped** onto the real lip + landing, ending in **Walking** on top. Built as a distinct `URogueMantleMode` + `URogueMantleTransition`, so `IsClimbing()` is false during it → the climb-exit-to-Falling *fling* can't fire. Motion = a `FLayeredMove_AnimRootMotion` (`OverrideAll`, self-terminating when the montage stops). MotionWarping works on Mover **without CMC**: `UMoverComponent` auto-wires a `UMotionWarpingMoverAdapter` when the actor owns a `UMotionWarpingComponent`. Completion is read from the sync state — `!LayeredMoves.HasMove<FLayeredMove_AnimRootMotion>()` → `GroundMovementModeName` (Walking).
+Top-out from climbing: push **up** at a ledge → an authored **root-motion** montage, **motion-warped** onto the real lip + landing, ending in **Walking** on top. Works on **tilted walls** (leaning toward or away). Built as a distinct `URogueMantleMode` + `URogueMantleTransition`, so `IsClimbing()` is false during it → the climb-exit-to-Falling *fling* can't fire. Motion = a `FLayeredMove_AnimRootMotion` (`OverrideAll`, self-terminating when the montage stops). MotionWarping works on Mover **without CMC**: `UMoverComponent` auto-wires a `UMotionWarpingMoverAdapter` when the actor owns a `UMotionWarpingComponent`. Completion is read from the sync state — `!LayeredMoves.HasMove<FLayeredMove_AnimRootMotion>()` → `GroundMovementModeName` (Walking).
 
-### Two-phase warping — trace the corner, don't cut it
+### The probe: wall-relative face, world-space landing
 
-**Problem.** One warp target (the landing) makes SkewWarp drive the root in a straight diagonal from grab → landing, which cuts *through* the wall corner, so the capsule/feet clip the lip.
+Key to tilted walls: **probe the climb FACE in wall-relative terms, but evaluate the LANDING in world/gravity space** (the character tops out standing upright). One rule separates "face vs top" everywhere — `dot(surfaceNormal, Up) < MantleMinWalkableDot` = wall face, else walkable top. `RefreshMantleProbe` runs each frame while climbing as the cheap **arming gate**:
 
-**Fix.** Two named warp windows, each with its own target, so the montage goes up *then* over:
+- **Overhead** — traces **perpendicular into the face** (`-WallNormal`, *not* horizontal) at the top of the ledge band. Only a *steep* hit blocks (face still climbing = tall wall, no lip); empty or a *walkable* hit both mean the face ended into a lip. Perpendicular keeps the clearance a consistent ~capsule-radius across tilts (a horizontal ray's gap varies with tilt and shoots *under* an overhang).
+- **Landing** — a down-trace finds the walkable top, then a **downward capsule sweep** (FindFloor-style) drops the real capsule and takes where it *rests*: settles onto a sloped top without the false self-overlap of a static overlap test, still stops on real obstacles.
+- **Height gate** — the rest's rise measured **along the wall** (`WallUp`), so the trigger window is a **tilt-invariant along-wall span** ("has the character climbed up to the lip" is an along-wall question; world-up compresses the window on a steep lean).
+
+### Precise lip at commit (decoupled from the landing)
+
+The cheap probe only *arms* the mantle; at commit `ComputePreciseMantleEdge` **binary-searches up the face** (perpendicular rays, a few lateral samples, midpoint-corrected) to localize the **lip** — independent of the landing, so a lip *higher* than the walk surface works. This is the `MantleUp` target. Perf↔precision knobs: `MantleLipScanIterations` (halves the error each step) × `MantleLipLateralSamples`, run once. (Same `Feet` origin — with `GetClimbSampleUpBias` — as the arming gate, or the band misaligns and the search caps below the lip.)
+
+### Two warp targets — trace the corner, don't cut it
+
+Two named SkewWarp windows so the montage goes up *then* over (a single landing target cuts a diagonal through the wall corner):
 
 ```
-MantleUp      → edge/lip   (landing pulled back to the wall face by MantleForwardReach)
-MantleForward → landing    (the walkable top point)
+MantleUp      → the lip      (precise scan)
+MantleForward → the landing  (sweep rest, on top)
 ```
 
-`BeginMantle()` sets both from the probe (`AddOrUpdateWarpTargetFromTransform`); the montage carries two SkewWarp windows named to match.
+`BeginMantle()` sets both (`AddOrUpdateWarpTargetFromTransform`). **SkewWarp warps the ENDPOINT, not the path** — the in-between is the clip's own root motion skewed, so forward bleeds into the up-window unless the window split is early enough (primary lever; `MantleEdgeUp`/`MantleEdgeBackward` nudge the target). **Overshoot caveat:** a very short window with no speed clamp overshoots (all remaining translation crammed into little time → huge velocity); fix = longer window or clamp.
 
-**The part to remember — SkewWarp warps the ENDPOINT, not the path.** Each window forces only its *end* onto the target; the in-between path is the clip's own root motion, skewed. So forward motion still bleeds into the up-window unless the split is early enough — the primary lever is the *window boundary* (move it earlier), secondarily `MantleEdgeForward` (forward offset of the MantleUp target).
+### Capsule wall-align + event-gated upright blend
 
-**Overshoot caveat.** A very short window with no max-speed clamp overshoots (feet end above the lip): the window must apply *all* remaining root translation within its duration → short window ⇒ huge per-frame velocity ⇒ discrete-step / exit-momentum overshoot. Fix = longer window (warp becomes a small correction, scale ≈ 1) or clamp velocity.
+During climb the capsule **tilts to lie against the wall** (`URogueClimbMode` orients to `MakeFromZX(WallUp, -WallNormal)`, gated by `bAlignToClimbSurface`), and the detection sweep/grid shift up **along the wall** (`GetClimbSampleUpBias`, not world-up) so they stay on a receding tilted face. The mantle **inherits that tilt** and eases to vertical (`QInterpTo`, `MantleUprightBlendSpeed`) **only when the montage fires the upright-blend event** (`MantleUprightBlendEventTag`) — so the character straightens on the authored frame, not with a snap at entry.
+
+> **Gotcha — custom action system, not stock GAS.** A montage "gameplay event" notify must route through `URogueActionSystemBlueprintLibrary::SendGameplayEventToActor` → `HandleGameplayEvent` → `GameplayEventReceivedDelegate`. Stock UE "Send Gameplay Event to Actor" targets `UAbilitySystemComponent` and does nothing here. Applies to every montage anim event (foot plants, IK windows, …).
 
 ### Root motion: the UE4→UE5 retarget drops it (the mesh-drift bug)
 
@@ -191,6 +203,11 @@ Inertialization = an `Inertialization` node downstream of the `DefaultSlot` + th
 **Later polish** — ledge shimmy; stamina + UI.
 
 ## TODO
+
 - Climb on uneven surfaces (especially surface intersections) — milestone 8 above.
 
+- Climb stamina via GAS.
 
+- Camera zooming out when climbing.
+
+- Mantle down.
