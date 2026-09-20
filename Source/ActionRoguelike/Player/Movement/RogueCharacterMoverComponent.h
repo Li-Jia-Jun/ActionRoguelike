@@ -129,6 +129,38 @@ public:
 	// false (mantle skipped) if the montage/warp component is missing.
 	bool BeginMantle();
 
+	// --- Mantle down (climb down from an edge) ---
+
+	// True while the mantle-down movement mode is the active movement mode.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|MantleDown")
+	bool IsMantlingDown() const;
+
+	// True when the mantle-down probe found a valid edge + descendable face this tick (refreshed while grounded).
+	// Published for a Zelda-style "press to climb down" affordance: the probe fully validates, so a press while this is
+	// true always succeeds. Drive a HUD prompt / anim state off it.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|MantleDown")
+	bool IsMantleDownAvailable() const { return bMantleDownAvailable; }
+
+	// Detected wall-face normal cached at mantle-down commit. The mode reads THIS (not the live grid, which the forward
+	// sweep loses mid-traversal while the character is out over the edge) to ease into the wall lean. Meaningful during
+	// the mantle-down.
+	FVector GetMantleDownWallNormal() const { return MantleDownWallNormalCache; }
+
+	// True once the mantle-down should ease into the wall tilt: immediately when no gate event tag is set, otherwise only
+	// after the montage has fired MantleDownTiltBlendEventTag (an anim "Send Gameplay Event" notify routed through the
+	// action system). Mirror of ShouldMantleBlendUpright, inverted (upright -> wall lean).
+	bool ShouldMantleDownBlendTilt() const { return !MantleDownTiltBlendEventTag.IsValid() || bMantleDownTiltBlendRequested; }
+
+	// Interp speed the mantle-down uses to ease its capsule from upright into the climb's wall-tilted orientation.
+	float GetMantleDownTiltBlendSpeed() const { return MantleDownTiltBlendSpeed; }
+
+	UAnimMontage* GetMantleDownMontage() const { return MantleDownMontage; }
+
+	// Plays the mantle-down montage on the mesh, queues the anim-root-motion layered move, and sets the two warp targets
+	// (edge/lip then hang) from the cached probe result. Called by URogueMantleDownTransition::Trigger on entry. Returns
+	// false (skipped) if the montage/warp component is missing.
+	bool BeginMantleDown();
+
 protected:
 
 	UFUNCTION()
@@ -138,6 +170,11 @@ protected:
 	// MantleUprightBlendEventTag. Sets bMantleUprightBlendRequested; consumed by ShouldMantleBlendUpright().
 	UFUNCTION()
 	void OnMantleUprightBlendEvent(FGameplayTag EventTag, FRogueGameplayEventData Payload);
+
+	// Action-system listener (bound in BeginPlay): starts the mantle-down tilt blend when the montage fires
+	// MantleDownTiltBlendEventTag. Sets bMantleDownTiltBlendRequested; consumed by ShouldMantleDownBlendTilt().
+	UFUNCTION()
+	void OnMantleDownTiltBlendEvent(FGameplayTag EventTag, FRogueGameplayEventData Payload);
 	
 	void SweepAndStoreWallHits();
 	
@@ -152,6 +189,13 @@ protected:
 	// if no lip is found (caller falls back to the cheap probe's cached edge). Cost = Iterations x LateralSamples traces, once.
 	bool ComputePreciseMantleEdge(FTransform& OutEdge) const;
 
+	// Mantle-DOWN probe (run while grounded): a cheap "is there an edge?" gate (a lower-front capsule that must be
+	// collision-free), then, only when armed, BACKWARD rays from out over the drop to find + validate a descendable
+	// wall face below the lip, plus min-face-height / hang-fit / swing-clearance / facing checks. On full success caches
+	// the two warp transforms (lip, hang) + the face normal and sets bMantleDownAvailable. Full validation each tick
+	// (behind the cheap gate) so a button press only fires when it's guaranteed to succeed (Zelda-style affordance).
+	void RefreshMantleDownProbe();
+
 	bool IsSurfaceClimbable(float SteepnessDotProduct) const;
 
 	// Upward sampling bias applied while climbing (hands reach high, legs curl), scaled by OnClimbAdditionalOffset
@@ -159,8 +203,6 @@ protected:
 	// wall the surface recedes as it rises, so a pure world-up shift would walk the sweep/grid off the surface;
 	// projecting keeps them on it at any tilt (== world up on a vertical wall). Pass the last-known plane normal.
 	FVector GetClimbSampleUpBias(const FVector& PlaneNormal) const;
-
-	bool EyeHeightTrace(const float TraceDistance) const;
 
 	// --- Detection tuning ---
 	
@@ -216,9 +258,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ForceUnits = "degrees"))
 	float MaxClimbNormalDeviationDegrees = 35.0f;
 
-	// Max |dot(normal, up)| for a surface to count as a near-vertical wall. 0 = perfectly vertical.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MaxClimbableSteepnessDot = 0.3f;
+	// Max lean FROM VERTICAL a surface may have to still count as a climbable WALL (vs a walkable top): 0 = perfectly
+	// vertical only, 40 = walls leaning up to +/-40deg from vertical. Converted internally to a normal test,
+	// |dot(normal, up)| <= sin(this) (see IsSurfaceClimbable). Shared by every climbing action (coverage grid, mantle-down
+	// face probe + lip scan). EFFECTIVE ceiling ~44deg: it must stay BELOW the walkable slope (MantleMinWalkableDot 0.7 =
+	// ~44.4deg from vertical) or walkable tops would classify as walls - that ordering IS the wall/walk gate.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ForceUnits = "degrees", ClampMin = "0.0", ClampMax = "89.0"))
+	float MaxWallTiltFromVerticalDegrees = 40.0f;
 
 	// Number of bottom rows treated as "lower body": drives LowerBodySupport / hang, and excluded from the entry gate.
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
@@ -346,6 +392,102 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Mantle")
 	FName MantleForwardWarpTargetName = FName("MantleForward");
 
+	// --- Mantle down (climb down from an edge) ---
+	// Stage 1 arming gate: a capsule in the lower front of the character. When it is collision-free the ground has
+	// ended ahead (an edge / drop), which arms the (heavier) face validation below. Placed forward of the feet so you
+	// must actually be at the edge.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownGateRadius = 20.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownGateHalfHeight = 30.0f;
+
+	// Forward offset (from the feet) of the arming-gate capsule centre.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownGateForwardOffset = 45.0f;
+
+	// Downward offset (below the feet) of the arming-gate capsule centre, so it probes for a floor just ahead.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownGateDownOffset = 10.0f;
+
+	// Stage 2: how far forward of the feet (plus capsule radius) to place the BACKWARD-ray origins - out over the drop,
+	// beyond the lip, so a ray fired back toward the wall strikes the near face.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownFaceSearchForward = 40.0f;
+
+	// Number of vertical backward-ray samples down the face (topmost hit ~= the lip; needs >= 2 to span a real face).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ClampMin = "2"))
+	int32 MantleDownFaceProbeCount = 6;
+
+	// Depth below the feet at which the FIRST (topmost) backward ray sits - just under the top surface so it reads the
+	// face, not the top lip.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownFaceProbeTopInset = 15.0f;
+
+	// How far below the feet the backward-ray band extends (the deepest sample). Also bounds the face-height search.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownMaxDepth = 140.0f;
+
+	// Minimum near-vertical face below the lip (measured along the wall's up-slope) for there to be something to hang on;
+	// rejects a mere step-down. No maximum: any tall wall is fine to climb down onto.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownMinFaceHeight = 60.0f;
+
+	// How far below the lip (along the wall) the hang capsule centre rests - roughly where the hands grab the lip and
+	// the body dangles. Sets the "down" warp target.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownHangDrop = 60.0f;
+
+	// Shrink applied to the fit/clearance test capsules so a capsule resting one radius off the face doesn't count the
+	// face itself as an overlap.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float MantleDownFitSkin = 3.0f;
+
+	// How far above the lip (ALONG THE WALL) the clearance corridor's TOP extends. The corridor is one capsule lying
+	// parallel to the wall from the hang feet up past the lip to here - it tests the whole swing-over-and-hang volume at
+	// once. Keep this modest: on a steep back-tilt the top leans back over the standing area with the wall.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownSwingClearanceUp = 30.0f;
+
+	// Max HORIZONTAL angle between the character's facing and the face outward normal to allow the drop (both flattened
+	// before the compare, so the window is the same at any wall tilt). Motion warping snaps the remainder; ~25deg lets
+	// you approach the edge loosely without lining up dead-on.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "degrees"))
+	float MantleDownFacingToleranceDegrees = 25.0f;
+
+	// Backward nudge (toward the top, away from the drop) of the lip/edge warp target so the feet land just inside the
+	// edge for the "forward" phase rather than out over it.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ForceUnits = "cm"))
+	float MantleDownEdgeBackward = 10.0f;
+
+	// Authored ROOT-MOTION mantle-down montage (stand at the edge -> grab lip -> swing down to a hang facing the wall).
+	// Author TWO Motion Warping (SkewWarp) windows: the "forward" section targeting MantleDownForwardWarpTargetName
+	// (over the lip), then the "down" section targeting MantleDownDownWarpTargetName (onto the face). Enable rotation
+	// warp on the down window so the ~180deg turn + the approach-angle snap resolve onto the wall.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
+	TObjectPtr<UAnimMontage> MantleDownMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
+	float MantleDownMontagePlayRate = 1.0f;
+
+	// Warp-target names on the montage's two Motion Warping windows. "Forward" targets the lip pivot (over the edge),
+	// "Down" targets the hang on the face (the climb hand-off pose) - the two-phase path traces the corner.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
+	FName MantleDownForwardWarpTargetName = FName("MantleDownForward");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
+	FName MantleDownDownWarpTargetName = FName("MantleDownDown");
+
+	// How fast the mantle-down eases its capsule from upright into the climb's wall lean (interp speed; higher = snappier;
+	// 0 = snap). The event (below) gates WHEN this starts.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown", meta = (ClampMin = "0.0"))
+	float MantleDownTiltBlendSpeed = 8.0f;
+
+	// Gameplay event tag the mantle-down montage fires to START the tilt blend into the wall lean (routed through the
+	// action system). Leave UNSET to blend immediately at entry; set it to hold upright until that authored frame.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
+	FGameplayTag MantleDownTiltBlendEventTag;
+
 	TArray<FHitResult> CurrentWallHits;
 	
 	FCollisionQueryParams ClimbQueryParams;
@@ -370,6 +512,16 @@ protected:
 	// Set by OnMantleUprightBlendEvent when the montage fires the upright-blend event; reset per mantle in BeginMantle.
 	// Gates the mantle mode's ease-to-vertical (see ShouldMantleBlendUpright).
 	bool bMantleUprightBlendRequested = false;
+
+	// --- Cached mantle-down-probe state (refreshed each pre-sim-tick while grounded) ---
+	bool bMantleDownAvailable = false;
+	FTransform MantleDownEdgeTransformCache = FTransform::Identity;   // "forward" warp target: the lip pivot, over the edge
+	FTransform MantleDownHangTransformCache = FTransform::Identity;   // "down" warp target: the hang on the face (climb pose)
+	FVector MantleDownWallNormalCache = FVector::ZeroVector;          // detected face normal; the mode's tilt reads this
+
+	// Set by OnMantleDownTiltBlendEvent when the montage fires the tilt-blend event; reset per drop in BeginMantleDown.
+	// Gates the mantle-down mode's ease-into-wall-lean (see ShouldMantleDownBlendTilt).
+	bool bMantleDownTiltBlendRequested = false;
 
 	// Owner's warping component (found in BeginPlay); drives the mantle's motion-warp alignment to the ledge.
 	UPROPERTY(Transient)

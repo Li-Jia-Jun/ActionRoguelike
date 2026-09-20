@@ -6,6 +6,8 @@
 #include "RogueClimbTransition.h"
 #include "RogueMantleMode.h"
 #include "RogueMantleTransition.h"
+#include "RogueMantleDownMode.h"
+#include "RogueMantleDownTransition.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "GameFramework/Character.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -47,16 +49,22 @@ void URogueCharacterMoverComponent::InitializeComponent()
 	{
 		MovementModes.Add(URogueMantleMode::ModeName, NewObject<URogueMantleMode>(this));
 	}
+	if (!MovementModes.Contains(URogueMantleDownMode::ModeName))
+	{
+		MovementModes.Add(URogueMantleDownMode::ModeName, NewObject<URogueMantleDownMode>(this));
+	}
 
 	// Global transitions are evaluated in array order (first match wins), so the mantle must come before the climb
 	// transition (it wins over climb's exit-to-Falling at the lip). Drop any stale copies a BP may have snapshotted,
-	// then insert ours at the front in priority order.
+	// then insert ours at the front in priority order. (Mantle-down starts from Walking + a button, disjoint from the
+	// others by start mode, so its order among them is not load-bearing; kept at the front for consistency.)
 	Transitions.RemoveAll([](const TObjectPtr<UBaseMovementModeTransition>& Transition)
 	{
-		return Transition && (Transition->IsA<URogueMantleTransition>() || Transition->IsA<URogueClimbTransition>());
+		return Transition && (Transition->IsA<URogueMantleTransition>() || Transition->IsA<URogueMantleDownTransition>() || Transition->IsA<URogueClimbTransition>());
 	});
-	Transitions.Insert(NewObject<URogueMantleTransition>(this), 0);
-	Transitions.Insert(NewObject<URogueClimbTransition>(this), 1);
+	Transitions.Insert(NewObject<URogueMantleDownTransition>(this), 0);
+	Transitions.Insert(NewObject<URogueMantleTransition>(this), 1);
+	Transitions.Insert(NewObject<URogueClimbTransition>(this), 2);
 
 	Super::InitializeComponent();
 }
@@ -74,10 +82,11 @@ void URogueCharacterMoverComponent::BeginPlay()
 	{
 		MotionWarpingComp = Owner->FindComponentByClass<UMotionWarpingComponent>();
 
-		// Listen for the mantle upright-blend gameplay event the montage fires via its "Send Gameplay Event" notify.
+		// Listen for the mantle upright/tilt-blend gameplay events the montages fire via their "Send Gameplay Event" notify.
 		if (URogueActionSystemComponent* ActionSystem = Owner->FindComponentByClass<URogueActionSystemComponent>())
 		{
 			ActionSystem->GameplayEventReceivedDelegate.AddDynamic(this, &URogueCharacterMoverComponent::OnMantleUprightBlendEvent);
+			ActionSystem->GameplayEventReceivedDelegate.AddDynamic(this, &URogueCharacterMoverComponent::OnMantleDownTiltBlendEvent);
 		}
 	}
 
@@ -92,6 +101,11 @@ bool URogueCharacterMoverComponent::IsClimbing() const
 bool URogueCharacterMoverComponent::IsMantling() const
 {
 	return GetMovementModeName() == URogueMantleMode::ModeName;
+}
+
+bool URogueCharacterMoverComponent::IsMantlingDown() const
+{
+	return GetMovementModeName() == URogueMantleDownMode::ModeName;
 }
 
 namespace
@@ -181,14 +195,22 @@ void URogueCharacterMoverComponent::HandlePreSimulationTick(const FMoverTimeStep
 	SweepAndStoreWallHits();
 	RefreshClimbSurfaceInfo();
 
-	// The mantle probe only matters while climbing (it feeds the climb->mantle top-out transition).
+	// The up-mantle probe matters while climbing (feeds the climb->mantle top-out); the mantle-down probe matters while
+	// grounded (feeds the walk->mantle-down transition). They're mutually exclusive by state, so only one runs per tick.
 	if (IsClimbing())
 	{
 		RefreshMantleProbe();
+		bMantleDownAvailable = false;
+	}
+	else if (IsOnGround())
+	{
+		RefreshMantleDownProbe();
+		bMantleLedgeAvailable = false;
 	}
 	else
 	{
 		bMantleLedgeAvailable = false;
+		bMantleDownAvailable = false;
 	}
 }
 
@@ -282,9 +304,21 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 	const float ColStep = (Cols > 1) ? (ClimbGridHalfWidth * 2.0f) / (Cols - 1) : 0.0f;
 
 	const FVector Base = Updated->GetComponentLocation();
-	const FVector Forward = Updated->GetForwardVector();
+	const FVector Forward = Updated->GetForwardVector(); // trace direction; while climbing the tilted capsule already faces into the wall
 	const FVector Up = GetUpDirection();
-	const FVector Right = FVector::CrossProduct(Up, Forward).GetSafeNormal();
+
+	// Grid STACKING axes. At entry the character is upright (world up/right are correct) AND there is no plane yet. While
+	// climbing the capsule is TILTED to the wall, so stack the grid along the WALL (WallUp/WallRight from the cached plane)
+	// - a world-up grid skews across a tilted face (the same class of bug as the mantle feet reference). GridRight uses the
+	// climb mode's cross(Normal, WallUp) convention, so the left/right columns match on vertical AND tilted walls.
+	FVector GridUp = Up;
+	FVector GridRight = FVector::CrossProduct(Up, Forward).GetSafeNormal();
+	if (IsClimbing() && !PrevNormal.IsNearlyZero())
+	{
+		GridUp = (Up - Up.ProjectOnToNormal(PrevNormal)).GetSafeNormal();
+		if (GridUp.IsNearlyZero()) { GridUp = Up; }
+		GridRight = FVector::CrossProduct(PrevNormal, GridUp).GetSafeNormal();
+	}
 
 	ClimbSurfaceSamplesCache.Reserve(Rows * Cols);
 
@@ -308,7 +342,7 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 		{
 			const float HOffset = -ClimbGridHalfWidth + Col * ColStep; // col 0 = left, last col = right
 
-			const FVector Origin = Base + Up * VOffset + Right * HOffset + ClimbUpBias;
+			const FVector Origin = Base + GridUp * VOffset + GridRight * HOffset + ClimbUpBias;
 			const FVector End = Origin + Forward * ClimbSampleReach;
 
 			FClimbSurfaceSample Sample;
@@ -319,8 +353,12 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 			{
 				const float SteepnessDot = FVector::DotProduct(Hit.ImpactNormal, Up);
 				const FVector HorizontalNormal = Hit.ImpactNormal.GetSafeNormal2D();
+				// Facing is a HORIZONTAL question, so compare the FLATTENED forward - else while climbing the tilted
+				// capsule's forward carries a vertical component that shrinks the dot and tightens the gate on steep walls.
+				FVector FlatForward = Forward.GetSafeNormal2D();
+				if (FlatForward.IsNearlyZero()) { FlatForward = Forward; }
 				// Clamp before Acos: dot of two unit vectors can drift slightly outside [-1,1] and yield NaN.
-				const float FacingDot = FMath::Clamp(FVector::DotProduct(Forward, -HorizontalNormal), -1.0f, 1.0f);
+				const float FacingDot = FMath::Clamp(FVector::DotProduct(FlatForward, -HorizontalNormal), -1.0f, 1.0f);
 				const float FacingDegrees = FMath::RadiansToDegrees(FMath::Acos(FacingDot));
 
 				if (IsSurfaceClimbable(SteepnessDot) && FacingDegrees <= MinHorizontalDegreesToStartClimbing)
@@ -417,8 +455,13 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 bool URogueCharacterMoverComponent::IsSurfaceClimbable(float SteepnessDotProduct) const
 {
 	// SteepnessDotProduct = dot(surfaceNormal, up): ~0 for a vertical wall, ~+1 for a floor, ~-1 for a ceiling.
-	// A surface is climbable when its normal is close enough to horizontal (i.e. the surface is near-vertical).
-	return FMath::Abs(SteepnessDotProduct) <= MaxClimbableSteepnessDot;
+	// A surface is a WALL when (1) it is near-vertical - leaning no more than MaxWallTiltFromVerticalDegrees from vertical,
+	// tested as |dot| = sin(tilt-from-vertical) <= sin(MaxWallTiltFromVerticalDegrees) - AND (2) it is NOT a walkable top
+	// (dot < MantleMinWalkableDot). Clause (2) is the explicit walk/wall gate: it keeps a walkable surface from ever
+	// counting as a wall even if the tilt limit is (mis)set above the walkable slope. With the default 40deg (< ~44deg
+	// walkable) it is redundant but free insurance.
+	const float MaxSteepnessDot = FMath::Sin(FMath::DegreesToRadians(MaxWallTiltFromVerticalDegrees));
+	return FMath::Abs(SteepnessDotProduct) <= MaxSteepnessDot && SteepnessDotProduct < MantleMinWalkableDot;
 }
 
 FVector URogueCharacterMoverComponent::GetClimbSampleUpBias(const FVector& PlaneNormal) const
@@ -429,19 +472,6 @@ FVector URogueCharacterMoverComponent::GetClimbSampleUpBias(const FVector& Plane
 	const FVector Up = GetUpDirection();
 	const FVector WallUp = (Up - FVector::DotProduct(Up, PlaneNormal) * PlaneNormal).GetSafeNormal();
 	return (WallUp.IsNearlyZero() ? Up : WallUp) * OnClimbAdditionalOffset;
-}
-
-bool URogueCharacterMoverComponent::EyeHeightTrace(const float TraceDistance) const
-{
-	// Trace a line from eye level and see if it hits
-	
-	FHitResult HitResult;
-
-	const FVector Start = UpdatedComponent->GetComponentLocation() +
-			(UpdatedComponent->GetUpVector() * CacheOwnerCharacter->BaseEyeHeight);
-	const FVector End = Start + (UpdatedComponent->GetForwardVector() * TraceDistance);
-
-	return GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_WorldStatic, ClimbQueryParams);
 }
 
 void URogueCharacterMoverComponent::RefreshMantleProbe()
@@ -473,8 +503,13 @@ void URogueCharacterMoverComponent::RefreshMantleProbe()
 	
 	const FVector Up = GetUpDirection();
 	FVector WallUp = (Up - Up.ProjectOnToNormal(WallNormal)).GetSafeNormal();
+	if (WallUp.IsNearlyZero()) { WallUp = Up; }
 	const FVector UpBias = GetClimbSampleUpBias(ClimbDominantSurfaceNormalCache);
-	const FVector Feet = Updated->GetComponentLocation() - Up * CapHH + UpBias;
+	// [Fix A] Feet = the TILTED climbing capsule's real bottom, along its axis WallUp - NOT world-down. Using world Up*CapHH
+	// put Feet at perpendicular distance CapR - CapHH*sin(tilt) from the face, which crosses 0 near 40deg (CapR/CapHH), so
+	// the perpendicular probes here (and the precise lip scan) start on/behind the face and miss on steep walls. WallUp*CapHH
+	// keeps Feet a constant CapR off the face at any tilt (a no-op on vertical walls, where WallUp == Up).
+	const FVector Feet = Updated->GetComponentLocation() - WallUp * CapHH + UpBias;
 	const float ForwardOffset = CapR + MantleForwardReach;
 
 	// (a) Overhead test: probe PERPENDICULAR into the wall (-WallNormal), NOT horizontally, at the top of the band. A
@@ -548,16 +583,18 @@ void URogueCharacterMoverComponent::RefreshMantleProbe()
 		// Along-wall rise (WallUp), matching LedgeRise - so Feet + WallUp*EdgeUp lands at the real lip height on a tilt
 		// (a world-up EdgeUp used along WallUp would fall short by cos(tilt)). This is the cheap fallback edge; BeginMantle's
 		// precise scan overrides it at commit.
-		const float EdgeUp = FVector::DotProduct(DownHit.ImpactPoint - Feet, WallUp);
+		// [Fix C] To the LIP, not the inland landing: the down-hit sits ForwardOffset*dot(IntoWall,WallUp) higher along the
+		// wall than the lip on a tilt (leaning away), so subtract it - else this fallback edge (used when the precise scan
+		// fails) floats that much up in the air over the ledge, and the character mantles into it. 0 on vertical walls.
+		const float EdgeUp = FVector::DotProduct(DownHit.ImpactPoint - Feet, WallUp) - ForwardOffset * FVector::DotProduct(IntoWall, WallUp);
 		MantleLandingTransformCache = FTransform(LandingQuat, RestFeet);
 		MantleEdgeTransformCache = FTransform(LandingQuat, Feet + WallUp * EdgeUp + WallUp * MantleEdgeUp - IntoWall * MantleEdgeBackward);
-
 #if ENABLE_DRAW_DEBUG
 		if (CVarClimbingDebugDrawing.GetValueOnGameThread())
 		{
 			// Landing (MantleForward) target. The MantleUp/edge target is drawn by the precise scan (cyan) at commit;
 			// MantleEdgeTransformCache (set above) is now only a silent fallback, so it isn't drawn.
-			DrawDebugSphere(GetWorld(), MantleLandingTransformCache.GetLocation(), 12.0f, 10, FColor::Purple, false, 6.0f, 0, 2.0f);
+			DrawDebugSphere(GetWorld(), MantleLandingTransformCache.GetLocation(), 12.0f, 10, FColor::Purple, false, -1, 0, 2.0f);
 		}
 #endif
 	}
@@ -617,7 +654,10 @@ bool URogueCharacterMoverComponent::ComputePreciseMantleEdge(FTransform& OutEdge
 	// with the band the overhead already validated. Without it the scan's band sat UpBias (= OnClimbAdditionalOffset)
 	// LOWER, so a lip near the top of the band fell above the scan's Hi=Max and the search pegged ~UpBias below the lip
 	// regardless of iteration count.
-	const FVector Feet = Updated->GetComponentLocation() - Up * CapHH + GetClimbSampleUpBias(WallNormal);
+	// [Fix A] WallUp*CapHH (the tilted climbing capsule's real bottom), NOT world Up*CapHH - see the RefreshMantleProbe Feet
+	// note. With world Up the scan-ray origins sit CapR - CapHH*sin(tilt) off the face, going ~behind it near 40deg, so no
+	// ray registers an on-face hit and the scan returns false (no cyan/white spheres). WallUp keeps them a constant CapR off.
+	const FVector Feet = Updated->GetComponentLocation() - WallUp * CapHH + GetClimbSampleUpBias(WallNormal);
 	const float Reach = CapR + MantleForwardReach;
 
 	const int32 Iterations = FMath::Max(1, MantleLipScanIterations);
@@ -633,8 +673,12 @@ bool URogueCharacterMoverComponent::ComputePreciseMantleEdge(FTransform& OutEdge
 		const float Frac = (LateralSamples > 1) ? ((static_cast<float>(s) / (LateralSamples - 1)) * 2.0f - 1.0f) : 0.0f;
 		const FVector ColBase = Feet + WallRight * (Frac * MantleLipScanHalfWidth);
 
-		float Lo = MantleMinLedgeHeightFromFeet; // along-wall: known to still be on the face (steep hit)
-		float Hi = MantleMaxLedgeHeightFromFeet; // along-wall: known to be above the lip (empty, or a walkable top)
+		// [Fix B] The arming gate measures to the LANDING, which sits Reach*dot(IntoWall,WallUp) along the wall ABOVE the lip
+		// on a tilt (leaning away) or below it (overhang). So the true lip falls outside the raw [Min,Max] band - widen the
+		// bracket in the tilt's direction so it still straddles the lip (on-face at Lo, above the lip at Hi). 0 on vertical.
+		const float LipBandShift = Reach * FVector::DotProduct(IntoWall, WallUp);
+		float Lo = MantleMinLedgeHeightFromFeet - FMath::Max(0.0f, LipBandShift); // along-wall: known to still be on the face (steep hit)
+		float Hi = MantleMaxLedgeHeightFromFeet - FMath::Min(0.0f, LipBandShift); // along-wall: known to be above the lip (empty, or a walkable top)
 		FVector ColLip = FVector::ZeroVector;
 		bool bColFound = false;
 
@@ -692,12 +736,215 @@ bool URogueCharacterMoverComponent::ComputePreciseMantleEdge(FTransform& OutEdge
 #if ENABLE_DRAW_DEBUG
 	if (CVarClimbingDebugDrawing.GetValueOnGameThread())
 	{
-		DrawDebugSphere(GetWorld(), OutEdge.GetLocation(), 10.0f, 12, FColor::Cyan, false, 6.0f, 0, 2.0f);  // precise lip (feet target)
+		DrawDebugSphere(GetWorld(), OutEdge.GetLocation(), 10.0f, 12, FColor::Cyan, false, 3.0f, 0, 2.0f);  // precise lip (feet target)
 		DrawDebugSphere(GetWorld(), LipPoint, 5.0f, 8, FColor::White, false, 3.0f, 0, 1.5f);                // raw averaged lip hit on the face
 	}
 #endif
 
 	return true;
+}
+
+void URogueCharacterMoverComponent::RefreshMantleDownProbe()
+{
+	bMantleDownAvailable = false;
+
+	const USceneComponent* Updated = GetUpdatedComponent();
+	if (!Updated || !MantleDownMontage)
+	{
+		return;
+	}
+
+	// Standing basis: upright, forward = facing (toward the potential edge/drop). Flatten forward to horizontal so a
+	// tiny capsule tilt doesn't skew the probe.
+	const FVector Up = GetUpDirection();
+	FVector Forward = (Updated->GetForwardVector() - Updated->GetForwardVector().ProjectOnToNormal(Up)).GetSafeNormal();
+	if (Forward.IsNearlyZero())
+	{
+		return;
+	}
+
+	float CapR = ClimbDetectionCapsuleRadius;
+	float CapHH = ClimbDetectionCapsuleHalfHeight;
+	if (const UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(Updated))
+	{
+		CapR = Capsule->GetScaledCapsuleRadius();
+		CapHH = Capsule->GetScaledCapsuleHalfHeight();
+	}
+
+	const FVector Location = Updated->GetComponentLocation();
+	const FVector Feet = Location - Up * CapHH;
+
+	// --- Stage 1: cheap arming gate. Is there air below-and-ahead (the ground has ended into an edge)? ---
+	// A small capsule in the lower front; collision-free => at an edge. If it's blocked there's still ground ahead.
+	const FVector GateCenter = Feet + Forward * MantleDownGateForwardOffset - Up * MantleDownGateDownOffset;
+	const FCollisionShape GateShape = FCollisionShape::MakeCapsule(MantleDownGateRadius, MantleDownGateHalfHeight);
+	const bool bGateBlocked = GetWorld()->OverlapAnyTestByChannel(GateCenter, FQuat::Identity, ECC_WorldStatic, GateShape, ClimbQueryParams);
+
+#if ENABLE_DRAW_DEBUG
+	const bool bDebugDraw = CVarClimbingDebugDrawing.GetValueOnGameThread();
+	if (bDebugDraw)
+	{
+		DrawDebugCapsule(GetWorld(), GateCenter, MantleDownGateHalfHeight, MantleDownGateRadius, FQuat::Identity, bGateBlocked ? FColor::Red : FColor::Green, false, -1.0f, 0, 0.6f);
+	}
+#endif
+
+	if (bGateBlocked)
+	{
+		return; // ground still ahead -> not at an edge
+	}
+
+	// --- Stage 2: find the descendable face with BACKWARD rays. ---
+	// Origins sit out-front-and-below the lip (over the drop, alongside the face); each fires back toward the wall.
+	// The first near-vertical (climbable) hit is the face; its normal points back toward us (~+Forward). Averaging the
+	// hits gives the wall plane; the topmost hit approximates the lip, the span confirms a hangable face.
+	const int32 Samples = FMath::Max(2, MantleDownFaceProbeCount);
+	const float FrontDist = CapR + MantleDownFaceSearchForward;
+
+	FVector NormalSum = FVector::ZeroVector;
+	int32 HitCount = 0;
+	FVector TopFaceHit = FVector::ZeroVector;    // highest (nearest-top) climbable hit -> ~the lip
+	FVector BottomFaceHit = FVector::ZeroVector; // lowest climbable hit -> face extent
+	bool bHasFace = false;
+
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float Depth = FMath::Lerp(MantleDownFaceProbeTopInset, MantleDownMaxDepth, static_cast<float>(i) / (Samples - 1));
+		const FVector Origin = Feet + Forward * FrontDist - Up * Depth;
+		const FVector End = Feet - Forward * CapR - Up * Depth; // fire back toward (and just past) the character line
+		FHitResult Hit;
+		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Origin, End, ECC_WorldStatic, ClimbQueryParams);
+		const bool bFace = bHit && IsSurfaceClimbable(FVector::DotProduct(Hit.ImpactNormal, Up));
+		if (bFace)
+		{
+			NormalSum += Hit.ImpactNormal;
+			++HitCount;
+			if (!bHasFace) { TopFaceHit = Hit.ImpactPoint; bHasFace = true; } // first climbable hit = highest
+			BottomFaceHit = Hit.ImpactPoint;                                  // last climbable hit = lowest
+		}
+
+#if ENABLE_DRAW_DEBUG
+		if (bDebugDraw)
+		{
+			DrawDebugLine(GetWorld(), Origin, bHit ? Hit.ImpactPoint : End, bFace ? FColor::Green : (bHit ? FColor::Orange : FColor::Red), false, -1.0f, 0, 0.5f);
+		}
+#endif
+	}
+
+	if (HitCount < 2) // need a spanning face, not a lone hit
+	{
+		return;
+	}
+
+	const FVector WallNormal = NormalSum.GetSafeNormal();
+	FVector WallUp = (Up - Up.ProjectOnToNormal(WallNormal)).GetSafeNormal(); // follows the wall's up-slope (tilt-consistent)
+	if (WallUp.IsNearlyZero()) { WallUp = Up; }
+
+	// Gates evaluated as inline bools (NOT early returns) so the debug draw below always runs once we have a face - a
+	// green gate + green rays that still doesn't arm then shows WHICH gate failed, instead of silently drawing nothing.
+	// Gate A - facing (loose): the character must roughly face the face (out over the drop); the warp snaps the rest.
+	// Compare in the HORIZONTAL plane (both operands flattened) so the tolerance is a true horizontal angle at any tilt.
+	// Forward is already flattened above; flatten WallNormal too, else its vertical (tilt) component shrinks the dot and
+	// tightens the window on steep walls. A climbable face is near-vertical, so its 2D normal is well-defined (a
+	// degenerate zero would simply fail the gate, which is safe).
+	const FVector WallNormalHoriz = WallNormal.GetSafeNormal2D();
+	const float FacingDot = FVector::DotProduct(Forward, WallNormalHoriz);
+	const bool bFacingOk = FacingDot >= FMath::Cos(FMath::DegreesToRadians(MantleDownFacingToleranceDegrees));
+	// Gate B - min face height: the top-most and bottom-most face hits must span at least this along the wall (else it's a step).
+	const float FaceSpan = FVector::DotProduct(TopFaceHit - BottomFaceHit, WallUp);
+	const bool bHeightOk = FaceSpan >= MantleDownMinFaceHeight;
+
+	// Combined clearance corridor: ONE capsule lying PARALLEL to the wall, from the hang feet (bottom, = the purple warp
+	// target) up along the wall to a configurable amount above the lip (top). This is the whole volume the body occupies
+	// from the swing-over down into the hang, in a single test - it replaces the separate hang-fit + swing-clearance
+	// capsules. Anchored at the hang feet (a real, stable point), so it doesn't drift like the old floating swing box;
+	// wall-parallel because that's how the body lies against the face through the move.
+	// Find the TRUE lip (top edge of the face) by marching UP the face from the topmost ray hit until a perpendicular
+	// probe stops hitting the climbable face - the last on-face point is the edge. (An earlier version extrapolated the
+	// face plane up to the FEET height, but that assumed the lip sits at the stance height; on a forward-leaning face the
+	// lip can be below the stance, so it overshot ABOVE the lip. A local scan finds the real edge regardless of tilt or of
+	// where the lip sits relative to the feet.) TopFaceHit sits ~MantleDownFaceProbeTopInset below the top, so the march
+	// only needs to cover that inset plus a small margin.
+	FVector LipPoint = TopFaceHit;
+	{
+		const float ScanReach = CapR + MantleDownFaceSearchForward;
+		const float ScanStep = 4.0f;
+		const int32 ScanSteps = FMath::Clamp(FMath::CeilToInt((MantleDownFaceProbeTopInset + 20.0f) / ScanStep), 1, 20);
+		for (int32 s = 1; s <= ScanSteps; ++s)
+		{
+			const FVector Mid = TopFaceHit + WallUp * (ScanStep * s);
+			// Perpendicular into the face (-WallNormal), matching the face probe: consistent ~CapR clearance at any tilt.
+			FHitResult ScanHit;
+			const bool bScanHit = GetWorld()->LineTraceSingleByChannel(ScanHit, Mid + WallNormal * ScanReach, Mid - WallNormal * CapR, ECC_WorldStatic, ClimbQueryParams);
+			if (bScanHit && IsSurfaceClimbable(FVector::DotProduct(ScanHit.ImpactNormal, Up)))
+			{
+				LipPoint = ScanHit.ImpactPoint; // still on the face -> the lip is at least this high
+			}
+			else
+			{
+				break; // marched past the top edge
+			}
+		}
+	}
+
+	const FQuat HangQuat = FRotationMatrix::MakeFromZX(WallUp, -WallNormal).ToQuat();  // Z = WallUp -> capsule axis runs along the wall
+	const FVector HangCenter = LipPoint - WallUp * MantleDownHangDrop + WallNormal * CapR;
+	const FVector HangFeet = HangCenter - WallUp * CapHH;                               // corridor BOTTOM (= the purple hang target)
+	const FVector CorridorTop = LipPoint + WallUp * MantleDownSwingClearanceUp + WallNormal * CapR; // TOP: above the lip, same one-radius face offset
+	const FVector CorridorCenter = (HangFeet + CorridorTop) * 0.5f;
+	const float CorridorRadius = FMath::Max(1.0f, CapR - MantleDownFitSkin);
+	const float CorridorHalfHeight = FMath::Max(CorridorRadius, (CorridorTop - HangFeet).Size() * 0.5f); // tips land on HangFeet / CorridorTop
+	const FCollisionShape CorridorCapsule = FCollisionShape::MakeCapsule(CorridorRadius, CorridorHalfHeight);
+	const bool bCorridorClear = !GetWorld()->OverlapAnyTestByChannel(CorridorCenter, HangQuat, ECC_WorldStatic, CorridorCapsule, ClimbQueryParams);
+
+	bMantleDownAvailable = bFacingOk && bHeightOk && bCorridorClear;
+
+	if (bMantleDownAvailable)
+	{
+		MantleDownWallNormalCache = WallNormal;
+
+		// "Down" warp target: the hang FEET on the face (= HangCenter - WallUp*CapHH), tilted, facing into the wall - the
+		// climb hand-off pose. Because the mode rotates the capsule ABOUT ITS CENTER, the final center is frozen at
+		// feetTarget + (capsule axis when the warp lands)*CapHH. So this on-face target is correct precisely when the
+		// capsule has already tilted to the wall (axis = WallUp) by the moment the down-warp pins the feet: then
+		// center = HangFeet + WallUp*CapHH = HangCenter, exactly CapR off the face on every tilt -> flush. (If the tilt
+		// blend has NOT completed by then, the capsule is still partly upright and the center lands off by up to
+		// CapHH*dot(WallNormal,Up) -> hang in air / into wall; the fix there is to finish the tilt before the warp lands,
+		// not to move this target.)
+		MantleDownHangTransformCache = FTransform(HangQuat, HangFeet);
+
+		// "Forward" warp target: the true lip pivot, nudged back onto the top (HORIZONTALLY, so the nudge is a constant
+		// inset from the edge at any tilt) so the feet land just inside the edge. Upright, facing OUT over the drop
+		// (+WallNormal) - the rotation warp snaps the loose approach angle to this before the down window turns the
+		// character 180 to face the wall.
+		const FRotator EdgeRot = UMovementUtils::ApplyGravityToOrientationIntent(WallNormal.ToOrientationRotator(), GetWorldToGravityTransform(), true);
+		const FVector LipFeet = LipPoint - WallNormalHoriz * MantleDownEdgeBackward;
+		MantleDownEdgeTransformCache = FTransform(EdgeRot.Quaternion(), LipFeet);
+	}
+
+#if ENABLE_DRAW_DEBUG
+	if (bDebugDraw)
+	{
+		// Corridor is ALWAYS drawn once we have a face, so a green gate + green rays never leaves "nothing drawn":
+		//   green  = armed (all gates pass, corridor clear) | red = corridor blocked | yellow = corridor clear but an
+		//   upstream gate (facing / face-height) failed - the arrows below say which.
+		const FColor CorridorColor = bMantleDownAvailable ? FColor::Green : (!bCorridorClear ? FColor::Red : FColor::Yellow);
+		DrawDebugCapsule(GetWorld(), CorridorCenter, CorridorHalfHeight, CorridorRadius, HangQuat, CorridorColor, false, -1.0f, 0, 1.0f);
+
+		// Facing arrow (your forward) magenta when facing is the blocker; face-normal arrow orange when the span is too
+		// short. Drawn from the reconstructed lip, which is also where the warp targets anchor.
+		DrawDebugDirectionalArrow(GetWorld(), LipPoint, LipPoint + Forward * 45.0f, 8.0f, bFacingOk ? FColor::Green : FColor::Magenta, false, -1.0f, 0, 2.0f);
+		DrawDebugDirectionalArrow(GetWorld(), LipPoint, LipPoint + WallNormal * 40.0f, 8.0f, bHeightOk ? FColor::Green : FColor::Orange, false, -1.0f, 0, 2.0f);
+
+		if (bMantleDownAvailable)
+		{
+			DrawDebugSphere(GetWorld(), MantleDownEdgeTransformCache.GetLocation(), 10.0f, 12, FColor::Yellow, false, -1.0f, 0, 2.0f);  // forward/lip target
+			DrawDebugSphere(GetWorld(), MantleDownHangTransformCache.GetLocation(), 10.0f, 12, FColor::Purple, false, -1.0f, 0, 2.0f);  // down warp target (upright-feet drop)
+			// The DESIRED final hang capsule (center on HangCenter, tilted to the wall): the live capsule should coincide
+			// with this after the hand-off, flush against the face, on every tilt. Its side sits exactly CapR off the face.
+			DrawDebugCapsule(GetWorld(), HangCenter, CapHH, CapR, HangQuat, FColor::Purple, false, -1.0f, 0, 1.0f);
+		}
+	}
+#endif
 }
 
 bool URogueCharacterMoverComponent::BeginMantle()
@@ -782,5 +1029,74 @@ void URogueCharacterMoverComponent::OnMantleUprightBlendEvent(FGameplayTag Event
 	if (IsMantling() && MantleUprightBlendEventTag.IsValid() && EventTag.MatchesTag(MantleUprightBlendEventTag))
 	{
 		bMantleUprightBlendRequested = true;
+	}
+}
+
+bool URogueCharacterMoverComponent::BeginMantleDown()
+{
+	if (!MantleDownMontage || !MotionWarpingComp || !CacheOwnerCharacter)
+	{
+		return false;
+	}
+
+	USkeletalMeshComponent* Mesh = CacheOwnerCharacter->GetMesh();
+	UAnimInstance* AnimInstance = Mesh ? Mesh->GetAnimInstance() : nullptr;
+	if (!AnimInstance)
+	{
+		return false;
+	}
+
+	// Keep the mesh riding the capsule during warping: root extraction must be enabled (see BeginMantle for the full why).
+	AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+
+	// Each drop starts HOLDING upright; the tilt blend waits for the montage's gameplay event. (When the tag is unset,
+	// ShouldMantleDownBlendTilt() returns true immediately - blend into the lean at entry.)
+	bMantleDownTiltBlendRequested = false;
+
+	// Warp targets from the per-tick probe (already validated -> always-succeed). Two-phase: "forward" -> the lip pivot
+	// over the edge, "down" -> the hang on the face. Set BEFORE the layered move ticks (see BeginMantle for the ordering).
+	MotionWarpingComp->AddOrUpdateWarpTargetFromTransform(MantleDownForwardWarpTargetName, MantleDownEdgeTransformCache);
+	MotionWarpingComp->AddOrUpdateWarpTargetFromTransform(MantleDownDownWarpTargetName, MantleDownHangTransformCache);
+
+	const float MontageLength = AnimInstance->Montage_Play(MantleDownMontage, MantleDownMontagePlayRate);
+	if (MontageLength <= 0.0f)
+	{
+		return false;
+	}
+
+	FAnimMontageInstance* MontageInstance = AnimInstance->GetActiveInstanceForMontage(MantleDownMontage);
+	if (!MontageInstance)
+	{
+		return false;
+	}
+	// Disable only the MOVEMENT-facing root motion so this layered move is the single capsule driver (the visual root
+	// snap stays; see BeginMantle).
+	MontageInstance->PushDisableRootMotion();
+	const float StartPosition = MontageInstance->GetPosition();
+
+	TSharedPtr<FLayeredMove_AnimRootMotion> MantleDownMove = MakeShared<FLayeredMove_AnimRootMotion>();
+	MantleDownMove->MontageState.Montage = MantleDownMontage;
+	MantleDownMove->MontageState.PlayRate = MantleDownMontagePlayRate;
+	MantleDownMove->MontageState.StartingMontagePosition = StartPosition;
+	MantleDownMove->MontageState.CurrentPosition = StartPosition;
+	MantleDownMove->DurationMs = ((MantleDownMontage->GetPlayLength() - StartPosition) / FMath::Abs(MantleDownMontagePlayRate)) * 1000.0f;
+	// Zero the velocity handed to Climbing when the move ends, so there's no launch off the face.
+	MantleDownMove->FinishVelocitySettings.FinishVelocityMode = ELayeredMoveFinishVelocityMode::SetVelocity;
+	MantleDownMove->FinishVelocitySettings.SetVelocity = FVector::ZeroVector;
+	// MixMode is OverrideAll from the struct constructor.
+
+	QueueLayeredMove(MantleDownMove);
+
+	// (Capsule collision is relaxed for the traversal by URogueMantleDownMode::Activate/Deactivate.)
+	return true;
+}
+
+void URogueCharacterMoverComponent::OnMantleDownTiltBlendEvent(FGameplayTag EventTag, FRogueGameplayEventData Payload)
+{
+	// Start the mantle-down's ease-into-wall-lean from this authored point in the montage. Only while actually mantling
+	// down, and only for our configured tag (the delegate is global - it fires for every gameplay event).
+	if (IsMantlingDown() && MantleDownTiltBlendEventTag.IsValid() && EventTag.MatchesTag(MantleDownTiltBlendEventTag))
+	{
+		bMantleDownTiltBlendRequested = true;
 	}
 }

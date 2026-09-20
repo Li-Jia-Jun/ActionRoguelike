@@ -13,6 +13,7 @@
 #include "ActionSystem/GameplayAbility/RogueGameplayAbility.h"
 #include "ActionSystem/AttributeSet/RogueAttributeSet.h"
 #include "Player/Movement/RogueCharacterMoverComponent.h"
+#include "Player/Movement/RogueTraversalInputs.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
 #include "Backends/MoverStandaloneLiaison.h"
 #include "MoverDataModelTypes.h"
@@ -56,6 +57,11 @@ void ASPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	InputComp->BindAction(Input_Jump, ETriggerEvent::Started, this, &ASPlayerCharacter::JumpStart);
 	InputComp->BindAction(Input_Jump, ETriggerEvent::Completed, this, &ASPlayerCharacter::JumpStop);
+
+	if (Input_MantleDown)
+	{
+		InputComp->BindAction(Input_MantleDown, ETriggerEvent::Started, this, &ASPlayerCharacter::MantleDownStart);
+	}
 
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Started, this, &ASPlayerCharacter::SprintStart);
 	InputComp->BindAction(Input_Sprint, ETriggerEvent::Completed, this, &ASPlayerCharacter::SprintStop);
@@ -169,6 +175,13 @@ void ASPlayerCharacter::JumpStop(const FInputActionValue& InValue)
 	bIsJumpJustPressed = false;
 }
 
+void ASPlayerCharacter::MantleDownStart(const FInputActionValue& InValue)
+{
+	// One-frame edge (a tap), forwarded to Mover and cleared in ProduceInput. The mantle-down transition only acts on it
+	// when the mover component's probe reports an edge available, so a press with nowhere to drop is harmlessly ignored.
+	bMantleDownJustPressed = true;
+}
+
 void ASPlayerCharacter::SprintStart(const FInputActionValue& InValue)
 {
 	// Don't sprint while airborne, or while movement is suppressed (e.g. stunned drops MaxSpeed near zero).
@@ -194,18 +207,33 @@ void ASPlayerCharacter::SprintStop(const FInputActionValue& InValue)
 
 void ASPlayerCharacter::PrimaryAttack(const FInputActionValue& InValue)
 {
+	if (!bCanAttack)
+	{
+		return;
+	}
+	
 	URogueGameplayAbility* OutAbility = nullptr;
 	ActionSystemComp->TryActivateAbilityByTag(PrimaryAttackAbilitySpec.AbilityTag, OutAbility);
 }
 
 void ASPlayerCharacter::SecondaryAttack(const FInputActionValue& InValue)
 {
+	if (!bCanAttack)
+	{
+		return;
+	}
+	
 	URogueGameplayAbility* OutAbility = nullptr;
 	ActionSystemComp->TryActivateAbilityByTag(SecondaryAttackAbilitySpec.AbilityTag, OutAbility);
 }
 
 void ASPlayerCharacter::SpecialAttack(const FInputActionValue& InValue)
 {
+	if (!bCanAttack)
+	{
+		return;
+	}
+	
 	URogueGameplayAbility* OutAbility = nullptr;
 	ActionSystemComp->TryActivateAbilityByTag(SpecialAttackAbilitySpec.AbilityTag, OutAbility);
 }
@@ -305,10 +333,10 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, CachedMoveInputIntent);
 		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}
-	else if (MoverComp->IsMantling())
+	else if (MoverComp->IsMantling() || MoverComp->IsMantlingDown())
 	{
-		// The mantle's root-motion layered move (OverrideAll) owns motion + orientation; feed nothing so a stray
-		// stick or camera turn can't perturb it.
+		// A mantle (up or down) is driven by its root-motion layered move (OverrideAll), which owns motion + orientation;
+		// feed nothing so a stray stick or camera turn can't perturb it (and can't trip the climb contextual entry).
 		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, FVector::ZeroVector);
 		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}
@@ -338,8 +366,14 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 	CharacterInputs.SuggestedMovementMode = NAME_None;
 	CharacterInputs.bUsingMovementBase = false;
 
-	// Consume the one-frame jump edge so it isn't re-applied on subsequent simulation frames.
+	// Traversal button edges (mantle-down today). Carried on our own input block alongside the stock inputs; read by the
+	// traversal transitions (e.g. URogueMantleDownTransition).
+	FRogueTraversalInputs& TraversalInputs = InputCmdResult.InputCollection.FindOrAddMutableDataByType<FRogueTraversalInputs>();
+	TraversalInputs.bWantsToMantleDown = bMantleDownJustPressed;
+
+	// Consume the one-frame edges so they aren't re-applied on subsequent simulation frames.
 	bIsJumpJustPressed = false;
+	bMantleDownJustPressed = false;
 }
 
 UCommonLegacyMovementSettings* ASPlayerCharacter::GetMoverSettings() const

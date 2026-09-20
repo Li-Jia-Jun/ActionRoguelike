@@ -57,6 +57,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Ability")
 	TArray<TSubclassOf<URogueGameplayAbility>> InbornAbilities;
 	
+	UPROPERTY(EditDefaultsOnly, Category="Attack")
+	bool bCanAttack = true;
+	
 	UPROPERTY(EditDefaultsOnly, Category = "Attack")
 	TSubclassOf<URogueGameplayAbility> PrimaryAttackAbilityCls;
 	FRogueGameplayAbilitySpec PrimaryAttackAbilitySpec; 
@@ -109,6 +112,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> Input_Climb;
 
+	// Tap (e.g. F) to climb down over a ledge into a hang. Fed to Mover via FRogueTraversalInputs::bWantsToMantleDown,
+	// consumed by URogueMantleDownTransition (which only fires when the mover component's probe reports an edge available).
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> Input_MantleDown;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Component")
 	TObjectPtr<URogueActionSystemComponent> ActionSystemComp;
 	
@@ -131,6 +139,8 @@ protected:
 	FVector CachedMoveInputIntent = FVector::ZeroVector;
 	bool bIsJumpPressed = false;
 	bool bIsJumpJustPressed = false;
+	// One-frame edge for the mantle-down tap; set by MantleDownStart, forwarded to Mover then cleared in ProduceInput.
+	bool bMantleDownJustPressed = false;
 
 	void Move(const FInputActionValue& InValue);
 
@@ -141,6 +151,8 @@ protected:
 	void JumpStart(const FInputActionValue& InValue);
 
 	void JumpStop(const FInputActionValue& InValue);
+
+	void MantleDownStart(const FInputActionValue& InValue);
 
 	void SprintStart(const FInputActionValue& InValue);
 

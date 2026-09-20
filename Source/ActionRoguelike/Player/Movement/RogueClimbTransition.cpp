@@ -38,8 +38,8 @@ FTransitionEvalResult URogueClimbTransition::Evaluate_Implementation(const FSimu
 		// and not within the brief re-entry cooldown after a previous climb.
 		const bool bAirborneOk = !MoverComp->RequiresAirborneToGrab() || MoverComp->IsAirborne();
 
-		// Also guard against re-grabbing the wall during a mantle (airborne + still near a climbable surface).
-		if (MoverComp->CanClimbNow() && bAirborneOk && !MoverComp->IsMantling() && !MoverComp->IsClimbReentryOnCooldown(Params.TimeStep.BaseSimTimeMs))
+		// Also guard against re-grabbing the wall during a mantle up/down (airborne + still near a climbable surface).
+		if (MoverComp->CanClimbNow() && bAirborneOk && !MoverComp->IsMantling() && !MoverComp->IsMantlingDown() && !MoverComp->IsClimbReentryOnCooldown(Params.TimeStep.BaseSimTimeMs))
 		{
 			const FVector MoveIntentDir = CharacterInputs->GetMoveInput_WorldSpace().GetSafeNormal();
 			const FVector WallNormal = MoverComp->GetClimbDominantSurfaceNormal();
