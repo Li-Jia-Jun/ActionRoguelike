@@ -159,6 +159,15 @@ FVector2D URogueCharacterMoverComponent::GetClimbMoveIntent() const
 
 float URogueCharacterMoverComponent::GetClimbMoveSpeedFraction() const
 {
+	// Locked to a single handhold (can cling but not traverse): report zero push so the anim holds. The climb mode
+	// already zeros the along-wall velocity, so a non-zero fraction here would just skate the playrate against a body
+	// that isn't moving. It also collapses the hang idle<->move blend to the (dead-hang) idle - the relaxed pose you
+	// want when pinned - matching the body's held position.
+	if (!bCanMoveOnWall)
+	{
+		return 0.0f;
+	}
+
 	// Round (pre-square) push amount, direction-independent: 1 at any full push, matching the body's constant
 	// climb speed. Drives the blendspace PLAYRATE (Step A). Deliberately NOT |GetClimbMoveIntent()|, whose square
 	// mapping reaches sqrt(2) on diagonals and would make diagonal climbing play too fast (foot skate).
@@ -194,6 +203,8 @@ void URogueCharacterMoverComponent::HandlePreSimulationTick(const FMoverTimeStep
 {
 	SweepAndStoreWallHits();
 	RefreshClimbSurfaceInfo();
+	RefreshFootProbes();   // per-foot foothold probes + the both-feet gross-hang flag (self-gates on IsClimbing)
+	RefreshHandGrips();    // per-hand wall grip points for the Control Rig hand pins (self-gates on IsClimbing)
 
 	// The up-mantle probe matters while climbing (feeds the climb->mantle top-out); the mantle-down probe matters while
 	// grounded (feeds the walk->mantle-down transition). They're mutually exclusive by state, so only one runs per tick.
@@ -278,6 +289,8 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 
 	// Reset cached outputs each refresh.
 	bFacingClimbableSurface = false;
+	bCanMoveOnWall = false;
+	bLowerBodyHanging = false;
 	ClimbDominantSurfaceNormalCache = FVector::ZeroVector;
 	ClimbDominantSurfaceLocationCache = FVector::ZeroVector;
 	LowerBodySupport = UpperBodySupport = LeftSupport = RightSupport = 0.0f;
@@ -329,9 +342,14 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 	// Regional hit info (valid means climbable)
 	int32 GripValid = 0, GripTotal = 0;		// Upper body
 	int32 LowerValid = 0, LowerTotal = 0;
-	int32 LeftValid = 0, LeftTotal = 0;		
+	int32 LeftValid = 0, LeftTotal = 0;
 	int32 RightValid = 0, RightTotal = 0;
-	
+
+	// Hand purchase for the climbability / move gates (see below). The LEG hang is no longer derived from the grid -
+	// each foot has its own foothold probe (RefreshFootProbes / ProbeFoot), so the bottom rows only feed the legacy
+	// LowerBodySupport scalar now.
+	int32 TopRowValid = 0;                  // valid cells in the hand (top) row
+
 	// Grid-based line-tracing
 	for (int32 Row = 0; Row < Rows; ++Row)
 	{
@@ -387,6 +405,12 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 				else if (Col >= (Cols + 1) / 2) { ++RightTotal; RightValid += ValidInc; }
 			}
 
+			// Hand row (top): counts only VALID (climbable) hits, for the hand-purchase / move gates.
+			if (Sample.bHit && Row == Rows - 1)
+			{
+				++TopRowValid;
+			}
+
 #if ENABLE_DRAW_DEBUG
 			if (CVarClimbingDebugDrawing.GetValueOnGameThread())
 			{
@@ -423,10 +447,13 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 		}
 	}
 
-	// Entry gate 1 - coverage: enough of the GRIP (upper) band is backed by surface. (Lower rows may hang).
-	const bool bCoveragePass = (GripTotal > 0) && (GripValid >= FMath::CeilToInt(GripTotal * MinClimbCoverageRatio));
+	// Gate 1 - hand purchase: the top (hand) row must have >= ClimbTopRowMinHits cells on wall. This is the SOLE
+	// coverage requirement (no torso/grip ratio): hands are what hold you on, legs are free to hang. Clamped to the
+	// column count so a narrow grid can still satisfy it.
+	const int32 TopRowHitsToClimb = FMath::Min(ClimbTopRowMinHits, Cols);
+	const bool bHandPurchasePass = (TopRowValid >= TopRowHitsToClimb);
 
-	// Entry gate 2 - consistency: every valid sample normal agrees with the average (rejects corners / fragments).
+	// Gate 2 - consistency: every valid sample normal agrees with the average (rejects corners / fragments).
 	bool bConsistencyPass = (ValidCount > 0);
 	if (bConsistencyPass)
 	{
@@ -441,7 +468,15 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 		}
 	}
 
-	bFacingClimbableSurface = bCoveragePass && bConsistencyPass;
+	bFacingClimbableSurface = bHandPurchasePass && bConsistencyPass;
+
+	// Movement needs more hand purchase than clinging: below the move threshold the character holds position (the climb
+	// mode zeros the along-wall intent) so a single handhold reads as an idle cling rather than a slide.
+	const int32 TopRowHitsToMove = FMath::Min(ClimbTopRowMinHitsToMove, Cols);
+	bCanMoveOnWall = bFacingClimbableSurface && (TopRowValid >= TopRowHitsToMove);
+
+	// bLowerBodyHanging is set from the per-foot probes (RefreshFootProbes), not the grid: it's true only when BOTH
+	// feet lack a reachable foothold. A single foot over a void stays braced and is handled per-foot (tuck / IK).
 
 #if ENABLE_DRAW_DEBUG
 	if (CVarClimbingDebugDrawing.GetValueOnGameThread() && ValidCount > 0)
@@ -472,6 +507,168 @@ FVector URogueCharacterMoverComponent::GetClimbSampleUpBias(const FVector& Plane
 	const FVector Up = GetUpDirection();
 	const FVector WallUp = (Up - FVector::DotProduct(Up, PlaneNormal) * PlaneNormal).GetSafeNormal();
 	return (WallUp.IsNearlyZero() ? Up : WallUp) * OnClimbAdditionalOffset;
+}
+
+void URogueCharacterMoverComponent::RefreshFootProbes()
+{
+	// Carry each foot's previous hanging state across the reset - it feeds the release hysteresis in ProbeFoot.
+	const bool bLeftWasHanging = LeftFootProbe.bHanging;
+	const bool bRightWasHanging = RightFootProbe.bHanging;
+
+	// Reset each tick; only meaningful while climbing against a known plane (the probe sweeps toward it).
+	LeftFootProbe = FClimbFootProbeResult();
+	RightFootProbe = FClimbFootProbeResult();
+
+	if (!IsClimbing() || ClimbDominantSurfaceNormalCache.IsNearlyZero())
+	{
+		bLowerBodyHanging = false;
+		return;
+	}
+
+	LeftFootProbe = ProbeFoot(LeftFootSocketName, bLeftWasHanging);
+	RightFootProbe = ProbeFoot(RightFootSocketName, bRightWasHanging);
+
+	// Idle latch: while the player isn't driving movement, don't let a hanging foot RE-PLANT. That removes the
+	// hang->plant edge of the plant/hang limit cycle (the probe rides the animated foot, whose pose depends on the very
+	// decision it drives), so an idle foot at an edge settles into a stationary dangle near the surface - the only place
+	// the flicker is visible, and the acceptable pose - instead of pawing at the void. Moving re-enables re-planting.
+	if (GetClimbMoveSpeedFraction() <= FootPlantIdleInputDeadzone)
+	{
+		if (bLeftWasHanging && !LeftFootProbe.bHanging)   { LeftFootProbe = FClimbFootProbeResult();  LeftFootProbe.bHanging = true; }
+		if (bRightWasHanging && !RightFootProbe.bHanging) { RightFootProbe = FClimbFootProbeResult(); RightFootProbe.bHanging = true; }
+	}
+
+	// Gross lower-body hang (drives the dead-hang UPPER body) only when BOTH feet lack a foothold. A single foot over a
+	// void stays braced and is resolved per-foot (tuck / IK) - this is the OR->both flip enabled by the per-foot probes.
+	bLowerBodyHanging = bFacingClimbableSurface && LeftFootProbe.bHanging && RightFootProbe.bHanging;
+}
+
+FClimbFootProbeResult URogueCharacterMoverComponent::ProbeFoot(FName FootSocketName, bool bWasHanging) const
+{
+	// Dynamic per-foot probe: sphere-sweep from the ANIMATED foot bone toward the dominant climb plane to find a
+	// reachable climbable foothold. Independent of the grid's leg rows (the grid only supplies the plane). Because it
+	// follows the live foot, the plant/hang decision - and later the IK snap - can happen during motion.
+	FClimbFootProbeResult Result;
+	Result.bHanging = true;   // assume no foothold until one is found within reach
+
+	const USkeletalMeshComponent* Mesh = CacheOwnerCharacter ? CacheOwnerCharacter->GetMesh() : nullptr;
+	if (!Mesh || !GetWorld())
+	{
+		return Result;
+	}
+
+	const FVector WallNormal = ClimbDominantSurfaceNormalCache; // points out of the wall
+	const FVector FootLoc = Mesh->GetSocketLocation(FootSocketName);
+
+	// Release hysteresis: a foot that was already PLANTED searches wider (radius + reach) so a clearly-gone foothold is
+	// needed to switch to hanging; a hanging foot uses the base extents to acquire. Stops the flicker at ledge edges.
+	const float Hysteresis = bWasHanging ? 0.0f : FootProbeReleaseHysteresis;
+	const float Radius = FootProbeRadius + Hysteresis;
+	const float Reach = FootProbeReach + Hysteresis;
+
+	// Start OFF the wall (in free space in front of the face) and sweep back toward it, so the search always begins
+	// outside the surface no matter how the foot is posed. Reachable = a climbable hit within Reach.
+	const FVector Origin = FootLoc + WallNormal * FootProbeBackoff;
+	const FVector End = Origin - WallNormal * (FootProbeBackoff + Reach);
+
+	const FCollisionShape Sphere = FCollisionShape::MakeSphere(Radius);
+	FHitResult Hit;
+	const bool bHit = GetWorld()->SweepSingleByChannel(Hit, Origin, End, FQuat::Identity, ECC_WorldStatic, Sphere, ClimbQueryParams);
+
+	if (bHit && !Hit.bStartPenetrating)
+	{
+		const float SteepnessDot = FVector::DotProduct(Hit.ImpactNormal, GetUpDirection());
+		// A foothold must be a climbable wall (not a floor/ceiling) and roughly on the same face as the climb plane
+		// (rejects a perpendicular inner-corner wall that happens to be within reach).
+		const bool bSameFace = FVector::DotProduct(Hit.ImpactNormal, WallNormal) > 0.3f;
+		if (IsSurfaceClimbable(SteepnessDot) && bSameFace)
+		{
+			Result.bHanging = false;
+			Result.bHasTarget = true;
+			Result.TargetLocation = Hit.ImpactPoint;
+			Result.TargetNormal = Hit.ImpactNormal;
+		}
+	}
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarClimbingDebugDrawing.GetValueOnGameThread())
+	{
+		const FColor C = Result.bHanging ? FColor::Red : FColor::Green;
+		const FVector Marker = Result.bHasTarget ? Result.TargetLocation : End;
+		DrawDebugLine(GetWorld(), Origin, Marker, C, false, -1.0f, 0, 0.5f);
+		DrawDebugSphere(GetWorld(), Marker, Radius, 12, C, false, -1.0f, 0, 0.5f);
+	}
+#endif
+
+	return Result;
+}
+
+void URogueCharacterMoverComponent::RefreshHandGrips()
+{
+	LeftHandGrip = FClimbHandGrip();
+	RightHandGrip = FClimbHandGrip();
+
+	const USceneComponent* Updated = GetUpdatedComponent();
+	if (!IsClimbing() || ClimbDominantSurfaceNormalCache.IsNearlyZero() || !Updated)
+	{
+		return;
+	}
+
+	// Wall basis from the dominant plane. Anchor the grips to the CAPSULE (pure sim - stable, pose-independent) at a
+	// fixed hand offset, so they're steady pins even as the arms animate. Tune the offsets to sit where the braced idle
+	// hands already grab, so the Control Rig pin is seamless when the dead-hang blend engages.
+	const FVector Center = Updated->GetComponentLocation();
+	const FVector WallNormal = ClimbDominantSurfaceNormalCache;
+	const FVector Up = GetUpDirection();
+	FVector WallUp = (Up - Up.ProjectOnToNormal(WallNormal)).GetSafeNormal();
+	if (WallUp.IsNearlyZero()) { WallUp = Up; }
+	const FVector WallRight = FVector::CrossProduct(WallNormal, WallUp).GetSafeNormal();
+
+	const FVector AnchorBase = Center + WallUp * HandGripAnchorHeight;
+	LeftHandGrip  = ProbeHandGrip(AnchorBase - WallRight * HandGripStanceHalfWidth, WallNormal);
+	RightHandGrip = ProbeHandGrip(AnchorBase + WallRight * HandGripStanceHalfWidth, WallNormal);
+}
+
+FClimbHandGrip URogueCharacterMoverComponent::ProbeHandGrip(const FVector& Anchor, const FVector& WallNormal) const
+{
+	FClimbHandGrip Grip;
+	if (!GetWorld())
+	{
+		return Grip;
+	}
+
+	// Start OFF the wall and sweep toward it (same pattern as the foot probe), so it begins in free space.
+	const FVector Origin = Anchor + WallNormal * HandProbeBackoff;
+	const FVector End = Origin - WallNormal * (HandProbeBackoff + HandProbeReach);
+
+	const FCollisionShape Sphere = FCollisionShape::MakeSphere(HandProbeRadius);
+	FHitResult Hit;
+	const bool bHit = GetWorld()->SweepSingleByChannel(Hit, Origin, End, FQuat::Identity, ECC_WorldStatic, Sphere, ClimbQueryParams);
+
+	if (bHit && !Hit.bStartPenetrating)
+	{
+		const float SteepnessDot = FVector::DotProduct(Hit.ImpactNormal, GetUpDirection());
+		const bool bSameFace = FVector::DotProduct(Hit.ImpactNormal, WallNormal) > 0.3f;
+		if (IsSurfaceClimbable(SteepnessDot) && bSameFace)
+		{
+			Grip.bFound = true;
+			// Hold the grip a little OFF the surface (along the hit normal) so the hand isn't flush/embedded in the wall.
+			Grip.Location = Hit.ImpactPoint + Hit.ImpactNormal * HandGripSurfaceGap;
+			Grip.Normal = Hit.ImpactNormal;
+		}
+	}
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarClimbingDebugDrawing.GetValueOnGameThread())
+	{
+		const FColor C = Grip.bFound ? FColor::Magenta : FColor::Silver;
+		const FVector Marker = Grip.bFound ? Grip.Location : End;
+		DrawDebugLine(GetWorld(), Origin, Marker, C, false, -1.0f, 0, 0.5f);
+		DrawDebugSphere(GetWorld(), Marker, HandProbeRadius, 12, C, false, -1.0f, 0, 0.5f);
+	}
+#endif
+
+	return Grip;
 }
 
 void URogueCharacterMoverComponent::RefreshMantleProbe()

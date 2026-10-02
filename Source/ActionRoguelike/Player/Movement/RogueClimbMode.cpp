@@ -3,6 +3,7 @@
 #include "RogueClimbMode.h"
 
 #include "RogueCharacterMoverComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "MoverComponent.h"
 #include "MoverDataModelTypes.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
@@ -60,6 +61,13 @@ void URogueClimbMode::GenerateMove_Implementation(const FMoverTickStartData& Sta
 		{
 			WallMoveDir = WallMoveDir.GetSafeNormal();
 		}
+
+		// Single handhold (top row below the move threshold): cling in place - no along-wall locomotion. The character
+		// can still hold on (into-wall bias below keeps contact) and jump off; they just can't shuffle to a new spot.
+		if (!MoverComp->CanMoveWhileClimbing())
+		{
+			WallMoveDir = FVector::ZeroVector;
+		}
 	}
 	
 	// Rotational move
@@ -94,8 +102,29 @@ void URogueClimbMode::GenerateMove_Implementation(const FMoverTickStartData& Sta
 	// (scale == 1) until the ClimbCadence curve is authored.
 	OutProposedMove.LinearVelocity *= MoverComp->GetClimbCadenceScale();
 
-	// Additional velocity to keep wall contact (constant, NOT surged, so contact is always maintained).
-	OutProposedMove.LinearVelocity += -WallNormal * ClimbIntoWallSpeed;
+	// Keep wall contact by REGULATING the standoff, not bulldozing. Pull toward the wall when farther than the target
+	// standoff and ease to a stop as we arrive (and nudge back out if we've sunk past it). A constant press had nothing
+	// to brace against on a hang - where the body hangs over a void and only the hands are on wall - so it crept the
+	// capsule INTO the surface (pushing the detection rays inside it -> rows miss -> gradual fall) and slid the body
+	// down. Measuring to the dominant PLANE (infinite) keeps it valid even when the wall only exists up at the hands.
+	// NOT surged (contact shouldn't pulse with the anim cadence). Standoff 0 = auto (capsule radius, body just touching).
+	{
+		float Standoff = ClimbWallStandoff;
+		if (Standoff <= 0.0f)
+		{
+			const UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(GetMoverComponent()->GetUpdatedComponent());
+			Standoff = Capsule ? Capsule->GetScaledCapsuleRadius() : 34.0f;
+		}
+
+		const FVector PlaneLoc = MoverComp->GetClimbDominantSurfaceLocation();
+		const FVector CapsuleLoc = StartingSyncState->GetLocation_WorldSpace();
+		const float Gap = FVector::DotProduct(CapsuleLoc - PlaneLoc, WallNormal); // perpendicular standoff (>0 = in front of the wall)
+		const float StandoffError = Gap - Standoff;                              // >0 too far (pull in), <0 too close (push out)
+		const float CorrectionSpeed = (DeltaSeconds > 0.0f)
+			? FMath::Clamp(StandoffError / DeltaSeconds, -ClimbIntoWallSpeed, ClimbIntoWallSpeed)
+			: 0.0f;
+		OutProposedMove.LinearVelocity += -WallNormal * CorrectionSpeed;
+	}
 }
 
 void URogueClimbMode::SimulationTick_Implementation(const FSimulationTickParams& Params, FMoverTickEndData& OutputState)

@@ -47,9 +47,17 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climb", meta = (ForceUnits = "cm/s^2"))
 	float ClimbDeceleration = 1024.0f;
 
-	// Constant speed pressed toward the wall so the capsule stays in contact (collision absorbs the inward part).
+	// Max speed of the wall-contact correction (the clamp on the standoff controller). The capsule is pulled toward the
+	// wall when farther than ClimbWallStandoff and eased to a stop as it arrives (and nudged back out if it has sunk
+	// past it) - NOT a constant press, so it can't bulldoze the body into the wall on a hang.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climb", meta = (ForceUnits = "cm/s"))
 	float ClimbIntoWallSpeed = 40.0f;
+
+	// Target perpendicular distance from the capsule centre to the dominant wall plane - the standoff the contact
+	// controller holds. 0 = auto (use the capsule radius, so the body just touches). If set manually, keep it >= the
+	// capsule radius, or on a hang (wall only up at the hands, nothing to brace the pull) the body is drawn INTO the wall.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climb", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float ClimbWallStandoff = 0.0f;
 
 	TObjectPtr<const UCommonLegacyMovementSettings> CommonLegacySettings;
 };

@@ -20,6 +20,54 @@ struct FClimbSurfaceSample
 };
 
 /**
+ * Per-foot climb IK probe result. A sphere sweep follows the animated foot bone toward the dominant climb plane; this
+ * is what decides whether a single foot plants or hangs (independent of the coverage grid's leg rows). Drives the
+ * per-foot procedural tuck now and the Control Rig two-bone plant IK later.
+ */
+USTRUCT(BlueprintType)
+struct FClimbFootProbeResult
+{
+	GENERATED_BODY()
+
+	// True when this foot found NO reachable climbable foothold -> it should tuck/hang (per-foot tuck, or IK weight -> 0).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	bool bHanging = false;
+
+	// True when a foothold was found. TargetLocation/Normal are meaningful only then.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	bool bHasTarget = false;
+
+	// World foothold to plant the foot on (sweep contact point) and its surface normal. Valid when bHasTarget.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	FVector TargetLocation = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	FVector TargetNormal = FVector::ZeroVector;
+};
+
+/**
+ * Per-hand grip point on the climb wall. The grip is found from a BODY-anchored sweep (capsule + a fixed hand offset,
+ * projected to the plane), NOT the animated hand bone - so it's a stable world target the Control Rig can pin a hand
+ * effector to (e.g. the FBIK dead-hang, where the hands stay anchored while the body drops). Refreshed while climbing.
+ */
+USTRUCT(BlueprintType)
+struct FClimbHandGrip
+{
+	GENERATED_BODY()
+
+	// True when a climbable grip was found for this hand; Location/Normal are meaningful only then (pin weight 0 otherwise).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	bool bFound = false;
+
+	// World grip point (sweep contact on the wall) and its surface normal - the hand effector target + facing.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	FVector Location = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
+	FVector Normal = FVector::ZeroVector;
+};
+
+/**
  * URogueCharacterMoverComponent: project-specific Mover component for the player.
  *
  * Hosts the climbing system's surface detection (and, later, climb-mode registration). This is the Mover
@@ -46,9 +94,30 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsWallDetected() const { return CurrentWallHits.Num() > 0; }
 
-	// True when the most recent coverage grid deemed the surface ahead climbable (cached; refreshed each tick).
+	// True when the most recent grid deemed the surface ahead climbable - i.e. the hand (top) row has >= ClimbTopRowMinHits
+	// cells on wall AND the valid normals are consistent (cached; refreshed each tick). Gates both entry and sustain.
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool CanClimbNow() const { return bFacingClimbableSurface; }
+
+	// True when there is enough hand purchase (top row >= ClimbTopRowMinHitsToMove) to traverse the wall, not just cling.
+	// Below it the climb mode holds position (zeros along-wall intent) so a single handhold reads as an idle cling.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
+	bool CanMoveWhileClimbing() const { return bCanMoveOnWall; }
+
+	// True when the WHOLE lower body should hang (drives the dead-hang upper body): BOTH feet lack a reachable foothold
+	// (per the per-foot probes). A single foot over a void does NOT trigger this - it stays braced and is resolved
+	// per-foot (see the foot probes). The AnimBP time-smooths this into the hang blend alpha. Meaningful while climbing.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
+	bool IsLowerBodyHanging() const { return bLowerBodyHanging; }
+
+	// Per-foot foothold probe results are exposed as the BlueprintReadOnly members LeftFootProbe / RightFootProbe (read
+	// `.bHanging` to drive each foot's tuck, and later `.TargetLocation`/`.TargetNormal` for the Control Rig plant IK).
+	// These convenience accessors return each foot's hang bool directly for use as a tuck alpha.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
+	bool IsLeftFootHanging() const { return LeftFootProbe.bHanging; }
+
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
+	bool IsRightFootHanging() const { return RightFootProbe.bHanging; }
 
 	// True while the climb movement mode is the active movement mode.
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
@@ -177,8 +246,25 @@ protected:
 	void OnMantleDownTiltBlendEvent(FGameplayTag EventTag, FRogueGameplayEventData Payload);
 	
 	void SweepAndStoreWallHits();
-	
+
 	void RefreshClimbSurfaceInfo();
+
+	// Per-foot foothold probes (run each pre-sim tick while climbing; reads the animated foot sockets). Populates
+	// LeftFootProbe/RightFootProbe and, from them, bLowerBodyHanging (BOTH feet without a foothold). Self-gates on
+	// IsClimbing() + a valid plane.
+	void RefreshFootProbes();
+
+	// Sphere-sweeps one foot (by socket) from just off the wall toward the dominant plane; returns the foothold result
+	// (bHanging when none reachable). Uses the coverage grid's plane only for the sweep direction, not the leg rows.
+	// bWasHanging is the foot's previous state, for release hysteresis (a planted foot searches wider).
+	FClimbFootProbeResult ProbeFoot(FName FootSocketName, bool bWasHanging) const;
+
+	// Per-hand grip probes (run each pre-sim tick while climbing): sweeps from a body-anchored point to the wall for each
+	// hand and caches LeftHandGrip/RightHandGrip for the Control Rig hand pins. Self-gates on IsClimbing() + a valid plane.
+	void RefreshHandGrips();
+
+	// Sphere-sweeps from a body-anchored origin toward the plane; returns the climbable grip contact (bFound when hit).
+	FClimbHandGrip ProbeHandGrip(const FVector& Anchor, const FVector& WallNormal) const;
 
 	// Up-and-over probe (run while climbing): confirms the wall face has ended, finds the walkable top, checks
 	// capsule fit, and caches the landing transform. Populates bMantleLedgeAvailable / MantleLandingTransformCache.
@@ -250,9 +336,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ForceUnits = "cm"))
 	float ClimbSampleReach = 70.0f;
 
-	// Fraction of the GRIP (upper) rows that must be backed by surface to allow starting a climb.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinClimbCoverageRatio = 0.6f;
+	// Hand purchase, and the SOLE climbability gate (no torso/coverage-ratio requirement): the TOP row is where the
+	// hands grab, so the surface is climbable only if at least this many of its cells are backed by wall. 1 = a single
+	// (centre) handhold is enough to grab on and cling idle. Clamped to the column count. Gates both contextual entry
+	// and the climb's exit-to-Falling (via CanClimbNow), so 0 top-row hits drops the climb (or the mantle catches it at a lip).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
+	int32 ClimbTopRowMinHits = 1;
+
+	// Traversal gate: this many top-row (hand) cells must be backed by wall to MOVE along the surface (a single handhold
+	// lets you cling idle but not shuffle the hands around). Below it the climb mode zeros the along-wall intent. Keep
+	// >= ClimbTopRowMinHits; clamped to the column count.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
+	int32 ClimbTopRowMinHitsToMove = 2;
 
 	// Max angle a valid sample normal may deviate from the averaged normal (rejects corners / fragmented walls).
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ForceUnits = "degrees"))
@@ -266,7 +361,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ForceUnits = "degrees", ClampMin = "0.0", ClampMax = "89.0"))
 	float MaxWallTiltFromVerticalDegrees = 40.0f;
 
-	// Number of bottom rows treated as "lower body": drives LowerBodySupport / hang, and excluded from the entry gate.
+	// Number of bottom rows treated as "lower body" (legs), excluded from the climbability gate. The per-leg hang is now
+	// decided by the per-foot foothold probes (see FootIK below), not these rows - they only feed the legacy
+	// LowerBodySupport scalar now.
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "1"))
 	int32 ClimbLowerBodyRowCount = 2;
 
@@ -274,6 +371,71 @@ protected:
 	// surfaces (cylinders). 0 = snap (no smoothing); higher = snappier but jitterier.
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CoverageGrid", meta = (ClampMin = "0.0"))
 	float ClimbNormalSmoothingSpeed = 10.0f;
+
+	// --- Per-foot IK probe (foothold detection) ---
+	// Each foot sphere-sweeps from its animated bone toward the dominant plane to find a reachable foothold; the hit
+	// decides plant vs hang PER FOOT (independent of the coverage grid's leg rows).
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK")
+	FName LeftFootSocketName = FName("foot_l");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK")
+	FName RightFootSocketName = FName("foot_r");
+
+	// Sphere radius of the foothold probe - the search tolerance around the foot.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float FootProbeRadius = 12.0f;
+
+	// How far toward the wall (from the backed-off origin) a foot may reach and still count as planted - the IK
+	// reachability range. Beyond this the foot hangs/tucks.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float FootProbeReach = 45.0f;
+
+	// How far to back the sweep origin OFF the wall (along the plane normal) so it starts in free space in front of the face.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float FootProbeBackoff = 25.0f;
+
+	// Hysteresis (Schmitt trigger): while a foot is already PLANTED its foothold search widens by this - on both the
+	// sphere radius and the reach - so it takes a clearly-gone foothold to flip to hanging. Harder to release than to
+	// acquire, which stops the plant/hang flicker at ledge edges. 0 = no hysteresis.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float FootProbeReleaseHysteresis = 15.0f;
+
+	// Idle latch: when the climb move push (GetClimbMoveSpeedFraction) is at or below this, movement counts as idle and a
+	// hanging foot is NOT allowed to re-plant - so a foot at an edge settles into a stationary dangle instead of
+	// flickering plant<->hang (that oscillation is only visible at idle). Above it (moving) feet re-plant normally.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FootPlantIdleInputDeadzone = 0.05f;
+
+	// --- Per-hand grip probe (for the Control Rig hand pins / FBIK dead-hang) ---
+	// Each hand's grip is found by sweeping from a BODY-anchored point (capsule + offsets below, projected to the plane)
+	// toward the wall - stable and pose-independent, unlike the foot probe which follows the live bone. Tune the offsets
+	// so the found grips sit where the braced idle hands already grab, so pinning to them is seamless.
+
+	// Lateral half-distance between the two hand grips, from center along the wall-right axis.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float HandGripStanceHalfWidth = 18.0f;
+
+	// Height of the hand grips above the capsule centre (along wall-up) - roughly where the braced hands grab (chest/shoulder).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm"))
+	float HandGripAnchorHeight = 35.0f;
+
+	// Sphere radius of the hand-grip probe (search tolerance around the anchor).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float HandProbeRadius = 12.0f;
+
+	// How far toward the wall (from the backed-off origin) to search for the grip.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float HandProbeReach = 40.0f;
+
+	// How far to back the sweep origin OFF the wall (along the plane normal) so it starts in free space in front of the face.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float HandProbeBackoff = 25.0f;
+
+	// Gap held between the grip point and the wall surface (pushed OUT along the hit normal), so the hand sits a little
+	// off the face instead of flush/embedded - accounts for hand thickness / a natural grip standoff. 0 = on the surface.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|HandIK", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float HandGripSurfaceGap = 5.0f;
 
 	// --- Contextual entry ---
 
@@ -497,6 +659,23 @@ protected:
 	// --- Cached climb-surface state (refreshed each pre-sim-tick by RefreshClimbSurfaceInfo) ---
 
 	bool bFacingClimbableSurface = false;
+	// Enough hand purchase to traverse (top row >= ClimbTopRowMinHitsToMove); gates along-wall locomotion in the climb mode.
+	bool bCanMoveOnWall = false;
+	// BOTH feet lack a reachable foothold -> the whole lower body hangs (dead-hang upper body). Set from the foot probes.
+	bool bLowerBodyHanging = false;
+
+	// Per-foot foothold probe results (refreshed each pre-sim tick while climbing). Drive the per-foot tuck / plant IK.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing", meta = (AllowPrivateAccess = "true"))
+	FClimbFootProbeResult LeftFootProbe;
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing", meta = (AllowPrivateAccess = "true"))
+	FClimbFootProbeResult RightFootProbe;
+
+	// Per-hand grip points on the wall (body-anchored; refreshed while climbing). Pin the Control Rig hand effectors to
+	// these for the FBIK dead-hang (hands stay anchored, body drops). Location/Normal valid when bFound.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing", meta = (AllowPrivateAccess = "true"))
+	FClimbHandGrip LeftHandGrip;
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing", meta = (AllowPrivateAccess = "true"))
+	FClimbHandGrip RightHandGrip;
 	FVector ClimbDominantSurfaceNormalCache = FVector::ZeroVector;
 	FVector ClimbDominantSurfaceLocationCache = FVector::ZeroVector;
 	TArray<FClimbSurfaceSample> ClimbSurfaceSamplesCache;

@@ -12,31 +12,52 @@ Following Vitor Cantão's tutorial *in concept*, translated from CMC to Mover.
 - Per sample: must hit `ECC_WorldStatic` within reach, and its normal must pass the steepness (near-vertical) + **horizontal** facing (≤ `MinHorizontalDegreesToStartClimbing`; the forward is flattened, so a wall's tilt doesn't shrink the angle and reject a dead-on climber) test (`IsSurfaceClimbable`).
 - **Wall vs walk gate (`IsSurfaceClimbable`, shared by all climbing actions).** A surface is a WALL when it leans ≤ `MaxWallTiltFromVerticalDegrees` (target **±40°**, stored in degrees; internally `|dot(normal, Up)| ≤ sin(that)`) **and** is not walkable (`dot(normal, Up) < MantleMinWalkableDot`). The two thresholds must stay **ordered** — wall lean (sin 40° ≈ 0.64) below the walkable slope (0.7 ≈ 44° from vertical) — with a small dead-band between; that ordering *is* the gate (a wall threshold at/above the walkable one lets flat tops classify as walls). All climb, mantle-up, and mantle-down detection support this ±40° range.
 - **Grid basis follows the surface.** The grid stacks along the **wall** while climbing (`WallUp` / `WallRight` from the cached plane) and along **world up** at entry (character upright, no plane cached yet). So on a tilted wall the rows keep a constant standoff from the face instead of drifting off it — a world-up grid would walk the top rows off a steep face (past trace reach) and lose coverage.
-- **Coverage gate:** `validSamples / total ≥ MinCoverageRatio` (start forgiving, ~0.6) — this is the real fix for notches / fragmented / gappy surfaces.
-- **Consistency gate:** every valid normal within ~35° of the average normal — rejects corners and lumpy geometry.
+- **Hand-purchase gate (the SOLE coverage requirement).** The **top row is the hands** — climbability = *that row* has ≥ `ClimbTopRowMinHits` (default **1**) valid cells. There is **no torso/grip coverage-ratio gate** any more (the old `MinClimbCoverageRatio` was removed): the hands hold you on; the torso and legs are free to miss. A single centre handhold is enough to grab on and cling idle. Rationale for dropping the ratio: over the whole grip band it both under- and over-fired — a whole-top-row miss still passed at 0.6, while a good one-handhold ledge failed.
+- **Move threshold (hysteresis on the same row).** Traversing needs ≥ `ClimbTopRowMinHitsToMove` (default **2**) top-row cells — enough room to shuffle the hands. With exactly 1 you cling but the climb mode zeros the along-wall intent (`CanMoveWhileClimbing()` → false); escape is jump-off or the surface changing. Idle needs 1, moving needs 2 — that split *is* the two thresholds. **`GetClimbMoveSpeedFraction()` also returns 0 when locked**, so the anim holds (playrate 0) and the hang idle↔move blend collapses to the dead-hang idle — a single handhold reads as a relaxed cling, not a frozen mid-pull.
+- **Consistency gate:** every valid normal within ~35° of the average normal — rejects corners and lumpy geometry. (With coverage gone, this + the hand rule are the whole climbability test.)
 - Output the **dominant plane** = averaged valid normal + averaged valid point (drives the mode), and keep the per-sample results for animation.
 
 ## Design stance: forgiving + snapping
 - Thresholds lean lenient; the character snaps to the dominant plane rather than conforming exactly. Tighten only if players climb things they shouldn't.
 
-## State classification — only lower-body hang
-- Coverage picks a **coarse body state**, never per-limb states: **braced (no hang)** vs **lower-body hang**. There is intentionally no "left foot / right arm hanging" state.
-- `LowerBodySupport` = fraction of the bottom rows that hit → drives the hang blend as a **continuous, time-smoothed** scalar (not a hard bool), so climbing over a lip eases into the dangle.
-- The same grid also yields future states for free: top rows miss → mantle/top-out; one side misses → edge/reach.
+## State classification — gross hang (both feet) + per-foot probes (done, C++ side)
+- Two layers, not one: a **coarse gross hang** (whole lower body → the dead-hang *upper body*) **and** a **per-foot** plant/hang decision (the legs). Still never a per-limb *anim state* — the per-foot part is IK/tuck on top of the two-legged cycle.
+- **Gross hang = BOTH feet lack a foothold** (`IsLowerBodyHanging()`), set from the per-foot probes. This is the whole-lower-body-over-void case that warrants the dead-hang arms. **Evolution:** it started as a grid test (bottom-row 2×2 per leg, hang if *either* empty). That over-fired — a single foot over a void (the corner in image 4: left foot planted, right foot floating in braced pose) forced *both* legs to hang off a perfectly good foothold, or, kept braced, left the foot planted in air. So the trigger moved to **both feet** and the single-foot case moved to per-foot IK.
+- **Per-foot foothold probe (replaces the grid's leg rows).** Each foot sphere-sweeps from its **animated bone** toward the dominant plane (`ProbeFoot` → `LeftFootProbe`/`RightFootProbe`): a reachable climbable hit ⇒ plant target; none ⇒ that foot hangs/tucks. Because it follows the live foot, the plant/hang (and later the IK snap) can happen **during motion**. It's decoupled from the grid's leg rows but still uses the grid's **plane** as the sweep reference. This is the standard AAA approach (per-hand/foot IK traced to the climb surface); the dead-hang **move** L/R clips stay shelved.
+- **Smoothing lives in the AnimBP,** not C++: the mode publishes the raw bools each tick (gross `IsLowerBodyHanging()` + per-foot `bHanging`) and the AnimBP/Control Rig `FInterpTo`s them into blend/IK alphas. So "eases into the dangle" is anim-side blends of sim-side binaries.
+- `LowerBodySupport`/`Upper`/`Left`/`Right` fraction scalars are still published (cheap, handy for debug/HUD) but are **not** the hang driver any more — prune once nothing reads them.
+- The same grid still yields other states for free: top rows miss → mantle/top-out; a whole side misses → edge/reach (future).
+
+## Hang anim recipe — idle = dead-hang, move = climb + legs (AnimBP)
+- The hang's upper body is driven by **motion, not geometry**. Inside the lower-body-hang blend:
+  - **Idle** (`GetClimbMoveSpeedFraction()` → 0) = the **dead-hang idle** clip (arms fully extended, weight on the skeleton). A resting hang must relax to straight arms.
+  - **Moving** (→ 1) = the **climb move** blendspace upper body ⊕ dangling legs (per-bone), the *arms bent into the pull*.
+  - Blend the two by the speed fraction: `HangPose = Blend(hang_idle, climb_move ⊕ dangle_legs, GetClimbMoveSpeedFraction())`, then `Blend(braced, HangPose, smoothed IsLowerBodyHanging())`. Legs dangle at both ends. Effort scales with speed for free, and it stays phase-locked to the playrate (same fraction).
+- **Why not a torso-support / "full-hang" state.** Tried classifying a dead-hang from the torso rows missing (rope/pipe). Rejected: the believability axis proved to be **rest-vs-motion**, not wall contact — a *stationary* bent-arm mid-pull is the uncanny pose (a moving one reads as effort), and that's a speed question. The dead-hang **move** L/R clips are shelved; revisit only for a true rope/pipe dead-hang *shimmy*.
+- **Pre-IK caveat:** the idle↔move arm extend/bend is exactly where hand IK (milestone 5) matters — with the grip pinned, bending the arms should raise the *body* toward a fixed hold; pre-IK it drifts the hands a little across that transition, so keep it quick.
+
+## Wall contact — standoff controller, not a constant press
+- Keeping the capsule on the wall is a **regulated pull to a target standoff**, not a constant `-WallNormal · speed` press. Each tick the mode measures the perpendicular gap from the capsule centre to the dominant **plane** (`dot(centre − planePoint, planeNormal)`) and moves toward `ClimbWallStandoff` (0 = auto = capsule radius, so the body just touches), clamped by `ClimbIntoWallSpeed`. It eases to a stop as it arrives and nudges back **out** if it has sunk past the standoff.
+- **Why (the hang bug it fixes).** A constant press has nothing to brace against on a **hang** — the body is over a void, only the hands are on wall — so it crept the capsule *into* the surface, which (a) pushed the detection ray origins (at the capsule centre) *inside* the wall so the rows read empty → a **gradual fall**, and (b) slid the body down. Symptoms were "auto-falls with the top rows still green" and "sinks in + slides down"; `ClimbIntoWallSpeed = 0` stopped the fall but left a gap (nothing pulls you in) — the tell that the press was doing double duty. Measuring to the **infinite plane** keeps the standoff valid even though the wall only physically exists up at the hands, so the hang holds at the right distance without being bulldozed through. (This is why the trace-origin-backoff idea was dropped — regulating the press removes the root cause instead of hardening detection against it.)
 
 ## Data split: sim vs anim
 - **Sim** (climb mode / sync state): minimal — dominant normal + point only.
-- **Anim** (component, game-thread, like `CurrentWallHits`): full per-sample grid + `LowerBodySupport` (and Upper/Left/Right) scalars.
+- **Anim** (component, game-thread, like `CurrentWallHits`): full per-sample grid + the `IsLowerBodyHanging()` / `CanMoveWhileClimbing()` bools, the per-foot `LeftFootProbe`/`RightFootProbe` (`bHanging` + foothold `TargetLocation`/`TargetNormal`), and the legacy `LowerBodySupport`/Upper/Left/Right scalars.
 
 ## Per-limb refinement — IK on top (Control Rig)
 - The body state is coarse; individual hands/feet are resolved by **IK, not by more states or finer coverage**.
-- Each foot/hand runs a **dedicated probe** (trace toward the wall along the surface normal), separate from the coverage grid; the grid can *bias* the search toward cells it already marked solid.
-- Found a target → Control Rig two-bone IK plants there, searching a small region and snapping to the nearest valid spot (e.g. a notch edge); IK weight + position are `FInterpTo`'d with hysteresis to avoid popping.
+- **Foot probe — done (C++, detection):** `ProbeFoot` sphere-sweeps from the **animated foot bone** toward the dominant plane (origin backed off the wall so it starts in free space), within `FootProbeReach`; a climbable same-face hit within reach ⇒ foothold (`bHasTarget` + point/normal), else `bHanging`. Runs each pre-sim tick while climbing (`RefreshFootProbes`), reading `foot_l`/`foot_r`. Debug-draws the sweep (green plant / red hang). Following the live foot is what lets the plant/hang track motion. Feet only depend on the grid for the **plane**, not the leg rows.
+- **Release hysteresis (Schmitt trigger) — done.** First pass at the edge flicker: a foot that was already **planted** searches wider (radius + reach both grow by `FootProbeReleaseHysteresis`), so it takes a clearly-gone foothold to flip to hanging — harder to release than to acquire. `RefreshFootProbes` carries each foot's previous `bHanging` into `ProbeFoot` for this. Damps *noise*, but see next.
+- **The flicker is a FEEDBACK LOOP, not noise (key insight).** The probe rides the **animated foot**, whose pose depends on the plant/hang decision it's driving: the climb pose puts the foot further out (over the void) than the hang/tuck pose, so plant→foot-out→miss→hang→foot-in→hit→plant… a limit cycle. Hysteresis on the probe *extent* can't fix it because the *measured position itself* crosses the boundary each flip. Two real fixes: (a) decouple the probe origin from the pose (decide from a body/capsule anchor, snap only the IK target to the hit), or (b) break the cycle's return edge.
+- **Idle latch — done (chosen fix).** The cycle is only *visible* at idle (motion masks it), and a foot dangling near a surface reads far better than one pawing the air. So while the player isn't driving movement (`GetClimbMoveSpeedFraction() ≤ FootPlantIdleInputDeadzone`), a **hanging foot is not allowed to re-plant** (`RefreshFootProbes` forces it back to `bHanging`). That removes the hang→plant edge, making hang an *absorbing* state at idle → it converges to the stationary dangle instead of cycling. Applied to the **status** (bool), not the AnimBP blend alpha, so state and presentation don't diverge and the upcoming foot-lock/IK reads a stable decision. Moving re-enables normal re-planting (where the loop is hidden). Fuller fix if it ever shows *during* motion: the capsule-anchor decouple, or foot-lock (release on hip-to-target distance) with the plant IK.
+- **Remaining (Control Rig):** consume `TargetLocation`/`TargetNormal` → two-bone IK plant, searching a small region and snapping to the nearest valid spot (e.g. a notch edge); IK weight + position `FInterpTo`'d with hysteresis to avoid popping. Hands get the same treatment later.
+- **Hand grips — done (C++, detection):** `ProbeHandGrip`/`RefreshHandGrips` expose `LeftHandGrip`/`RightHandGrip` (`bFound` + world `Location`/`Normal`). Unlike the foot probe, the sweep is **body-anchored** (capsule + `HandGripStanceHalfWidth`/`HandGripAnchorHeight`, projected to the plane), *not* the live hand bone — so the grip is a **stable world pin** and can't enter the pose-feedback loop (the hands are about to be IK-pinned, so probing from them would be circular). Tune the offsets so the grips sit where the braced idle hands already grab (seamless pin). Debug-draws magenta (found) / silver (none).
+- **Dead-hang anchoring (FBIK) — AnimBP/CR side.** The idle dead-hang extends the arms (hands go overhead in the clip), which would lift them off the wall; the fix is **FBIK pinning both hand effectors to `LeftHandGrip`/`RightHandGrip` with pelvis translation enabled**, run after the pose blend each frame, weight ramped by the dead-hang alpha. The solver drops the **body** to keep the hands anchored as the arms extend (hand IK *alone* would just re-bend the arms — the body must be in the solve). Arms stiff / spine+pelvis free so it drops the body not the arms; feet left unpinned (they dangle, ride the drop). Moves the mesh pelvis, not the capsule (visual drop + mesh/capsule offset — watch camera). This is the hand-side of the sticky-world-target / foot-lock idea.
 
 ## Procedural tuck — floating-limb fallback
-- If a limb's probe finds no reachable target → blend that limb's IK weight to 0, so it falls back to the authored FK pose (≈ the wall plane); there is no separate "in-air" clip.
-- Add a small **additive/procedural tuck** (pull the foot toward the body/wall) so a floating foot reads as reaching, not frozen over open air.
-- This only ever covers small, unnoticeable single-limb misses; a whole-lower-body void is caught earlier by the **hang state**, not by FK-fallback.
+- When a foot's probe returns `bHanging` (no reachable target) → blend that foot's IK weight to 0 **and** apply a small **additive/procedural tuck** (pull the foot toward the body/wall) so it reads as dangling/reaching, not frozen over open air. IK-weight-0 alone isn't enough — the FK pose is the braced "planted on air" pose (image 4); the tuck is the half that actually kills the artifact.
+- The tuck is cheap (a procedural offset, not a full solve), so it's the first actuator to wire on top of the probe — before the full two-bone plant IK.
+- This covers **single-foot** misses; a whole-lower-body void (both feet `bHanging`) is caught earlier by the **gross hang** (dead-hang upper body), not by FK-fallback.
 
 ## Target pipeline (Mover-native)
 `Climb mode (state + GetPredictedTrajectory)` → `PoseSearch / Motion Matching picks clip` → `Motion Warping aligns root to target` → `Control Rig IK refines limbs` → `procedural tuck fallback`.
@@ -241,7 +262,7 @@ On montage completion the mode hands to **Climbing unconditionally** (the probe 
 - Verify the clip has **real root motion** (the "dotted line" test in the IK Retargeter; retarget recipe in the top-out's *Root motion* note — Copy from Source Root + Target Pelvis `root`) and validate the whole drop in-editor; tune the probe knobs (`Mover|Climbing|MantleDown`).
 
 ## Tuning knobs
-`MinHorizontalDegreesToStartClimbing`, grid dimensions & footprint (width/height/reach), `MinCoverageRatio`, normal-consistency angle, hang-blend smoothing rate, per-foot IK search radius + interp/hysteresis, tuck offset.
+`MinHorizontalDegreesToStartClimbing`, grid dimensions & footprint (width/height/reach), `ClimbTopRowMinHits` (grab/cling) + `ClimbTopRowMinHitsToMove` (traverse), `ClimbLowerBodyRowCount` (leg-footing band), normal-consistency angle, per-foot IK search radius + interp/hysteresis, tuck offset. (Hang-blend smoothing lives in the AnimBP now, not a C++ knob.)
 
 ## Status & roadmap
 
@@ -251,8 +272,8 @@ On montage completion the mode hands to **Climbing unconditionally** (the probe 
 3. **Mantle top-out** — first authored traversal: two-phase motion-warped root-motion montage → Walking; established the reusable traversal skeleton.
 
 **Next — big milestones, roughly ordered**
-4. **Lower-body hang blend** — drive the already-computed `LowerBodySupport` scalar into an anim blend so climbing over a lip eases into a dangle (the sim scalar exists; it just isn't wired to anim yet).
-5. **Per-foot / per-hand IK (Control Rig)** — dedicated limb probes + two-bone IK plant with interp/hysteresis, plus the floating-limb procedural tuck fallback (design lives in *Per-limb refinement* + *Procedural tuck* above).
+4. **Lower-body hang blend** — *C++/detection done* (gross `IsLowerBodyHanging()` now = BOTH feet without a foothold, from the per-foot probes; hand-purchase gate replaced the coverage ratio; `CanMoveWhileClimbing()` locks traversal to a single handhold; `GetClimbMoveSpeedFraction()` gated to 0 when locked). **Remaining (AnimBP):** `FInterpTo` the hang bool into an alpha, then blend per the *Hang anim recipe* above — `Blend(braced, Blend(hang_idle, climb_move ⊕ dangle_legs, speedFraction), hangAlpha)` — plus a subtle dead-hang sway.
+5. **Per-foot / per-hand IK (Control Rig)** — *foot probe done (C++ detection: `ProbeFoot`/`RefreshFootProbes`, foot-following sphere sweep → `LeftFootProbe`/`RightFootProbe`).* **Remaining:** the actuators — per-foot **procedural tuck** on `bHanging` (the artifact fix, do first) then two-bone **plant IK** to `TargetLocation`/`TargetNormal` with interp/hysteresis; then hands. Design in *Per-limb refinement* + *Procedural tuck* above.
 6. **Corner turns** — inner then outer; reuse the mantle traversal skeleton + side-probe corner classification (concave vs convex) + authored clips.
 7. **Climb feel polish** — wall-distance vs into-wall bias; **edge-clamp** (don't walk off a side edge — a cheap safety add-on).
 8. **Uneven surfaces** — climb across surface intersections / non-planar geometry.
@@ -261,12 +282,20 @@ On montage completion the mode hands to **Climbing unconditionally** (the probe 
 
 ## TODO
 
-- Precise mantle up (use hand pos as probe)
+- Into climb mode with aim body.
 
 - Climb on uneven surfaces (especially surface intersections) — milestone 8 above.
 
+- Upper body misses but still can climb.
+
+- Async probe.
+
 - Climb stamina via GAS.
 
+- Custom anim graph nodes for better performance?
+
 - Camera zooming out when climbing.
+
+- Precise mantle up (use hand pos as probe)?
 
 - Mantle down — **C++ implemented & compiling** (`URogueMantleDownMode` / `URogueMantleDownTransition` / `RefreshMantleDownProbe` / `FRogueTraversalInputs`). Remaining: montage + warp windows, `IA_MantleDown` + F binding, tilt event tag, and in-editor validation. See *Mantle down — implementation* above.
