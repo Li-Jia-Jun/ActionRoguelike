@@ -36,6 +36,16 @@ Following Vitor Cantão's tutorial *in concept*, translated from CMC to Mover.
 - **Why not a torso-support / "full-hang" state.** Tried classifying a dead-hang from the torso rows missing (rope/pipe). Rejected: the believability axis proved to be **rest-vs-motion**, not wall contact — a *stationary* bent-arm mid-pull is the uncanny pose (a moving one reads as effort), and that's a speed question. The dead-hang **move** L/R clips are shelved; revisit only for a true rope/pipe dead-hang *shimmy*.
 - **Pre-IK caveat:** the idle↔move arm extend/bend is exactly where hand IK (milestone 5) matters — with the grip pinned, bending the arms should raise the *body* toward a fixed hold; pre-IK it drifts the hands a little across that transition, so keep it quick.
 
+## Hang move — directional coverage (experiments; parked)
+Pack has only **idle (dead-hang) + 2 horizontal (L/R)** hang-move clips — no vertical/diagonal. Attempts to cover all 8 directions from these:
+- **2 real clips + braced-upper fallback for the other 6** — rejected: seams/pops at the boundary, and the braced-upper is exactly the off-looking pose.
+- **BS1D of the 2 L/R moves** — the center (average of two *sideways* clips) splays; two horizontal clips can't average into a vertical pull. Putting the **idle clip at the BS centre** fixes the odd centre (down then reads as idle-extended = lowering; straight-up is the lone compromise).
+- **BS2D (hang row at Y=0, braced climb at Y=±1)** — the mid-blend (half-pull arms + half-dangle legs) reads better than full dead-hang, but the half-pull **shortens the vertical stride** → vertical moves slower. Per-region bias (arms sample full vertical, legs sample horizontal/0 — two **synced** BS evals + a leg mask, or legs→CR) restores the stride but still can't conjure a vertical *pull* pose.
+
+**Root finding.** A vertical hang-pull **cannot be synthesised from horizontal clips** — it's missing *content*, not a blend-config problem. Off-the-shelf **8-directional hang-climb clips essentially don't exist**: real games do braced climb + ledge-hang + Uncharted-style ledge *jumps*, not sustained omnidirectional pure-hang climb (a short-character, BOTW-ish mechanic). Agentic/AI authoring is out for now (coding agents can't author motion; AI mocap is rough and needs retarget + cleanup).
+
+**Conclusion (shipping).** Live with **braced-climb upper body + hanging lower body**. Scope the hang to **idle (dead-hang) + horizontal shimmy + down (idle-extended = lowering)**. **Vertical-up is transient** — it resolves to **braced** (foot probes re-acquire footing → per-foot IK plants) or to **mantle**, so a sustained vertical-pull clip isn't actually needed. Optional later polish: a **procedural arm-pull** (up-intent → bend the arms, body rises via the FBIK drop) or **one bespoke vertical-pull clip** (author / video-mocap) if the pack author delivers.
+
 ## Wall contact — standoff controller, not a constant press
 - Keeping the capsule on the wall is a **regulated pull to a target standoff**, not a constant `-WallNormal · speed` press. Each tick the mode measures the perpendicular gap from the capsule centre to the dominant **plane** (`dot(centre − planePoint, planeNormal)`) and moves toward `ClimbWallStandoff` (0 = auto = capsule radius, so the body just touches), clamped by `ClimbIntoWallSpeed`. It eases to a stop as it arrives and nudges back **out** if it has sunk past the standoff.
 - **Why (the hang bug it fixes).** A constant press has nothing to brace against on a **hang** — the body is over a void, only the hands are on wall — so it crept the capsule *into* the surface, which (a) pushed the detection ray origins (at the capsule centre) *inside* the wall so the rows read empty → a **gradual fall**, and (b) slid the body down. Symptoms were "auto-falls with the top rows still green" and "sinks in + slides down"; `ClimbIntoWallSpeed = 0` stopped the fall but left a gap (nothing pulls you in) — the tell that the press was doing double duty. Measuring to the **infinite plane** keeps the standoff valid even though the wall only physically exists up at the hands, so the hang holds at the right distance without being bulldozed through. (This is why the trace-origin-backoff idea was dropped — regulating the press removes the root cause instead of hardening detection against it.)
@@ -282,7 +292,12 @@ On montage completion the mode hands to **Climbing unconditionally** (the probe 
 
 ## TODO
 
-- Into climb mode with aim body.
+
+- Find a better animation package have better hanging: 8 dir move + corner. Candidates:
+  - https://www.fab.com/listings/d33b6e39-06fd-4530-be40-96ffcaf22f4b (8 dir move, no corner, no mantle)
+  - https://www.fab.com/listings/6463c64d-8e64-43cb-832a-74566ef55198 (2 dir move, corner, air entry, mantle)
+
+- Climb on animated surface (need in-place body swing animation).
 
 - Climb on uneven surfaces (especially surface intersections) — milestone 8 above.
 
