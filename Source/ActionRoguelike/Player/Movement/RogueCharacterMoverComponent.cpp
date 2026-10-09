@@ -8,12 +8,16 @@
 #include "RogueMantleTransition.h"
 #include "RogueMantleDownMode.h"
 #include "RogueMantleDownTransition.h"
+#include "RogueCornerTurnMode.h"
+#include "RogueCornerTurnTransition.h"
+#include "RogueSharedGameplayTags.h"
 #include "ActionSystem/RogueActionSystemComponent.h"
 #include "GameFramework/Character.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
+#include "Animation/AnimSequence.h"
 #include "MotionWarpingComponent.h"
 #include "MoveLibrary/MovementUtils.h"
 #include "DefaultMovementSet/LayeredMoves/AnimRootMotionLayeredMove.h"
@@ -53,18 +57,26 @@ void URogueCharacterMoverComponent::InitializeComponent()
 	{
 		MovementModes.Add(URogueMantleDownMode::ModeName, NewObject<URogueMantleDownMode>(this));
 	}
+	if (!MovementModes.Contains(URogueCornerTurnMode::ModeName))
+	{
+		MovementModes.Add(URogueCornerTurnMode::ModeName, NewObject<URogueCornerTurnMode>(this));
+	}
 
 	// Global transitions are evaluated in array order (first match wins), so the mantle must come before the climb
 	// transition (it wins over climb's exit-to-Falling at the lip). Drop any stale copies a BP may have snapshotted,
 	// then insert ours at the front in priority order. (Mantle-down starts from Walking + a button, disjoint from the
-	// others by start mode, so its order among them is not load-bearing; kept at the front for consistency.)
+	// others by start mode, so its order among them is not load-bearing; kept at the front for consistency.) The corner
+	// turn sits after the mantle (an up-diagonal at a top corner prefers the mantle) and before climb (it must win over
+	// climb's exit-to-Falling when the grid starts failing at the corner).
 	Transitions.RemoveAll([](const TObjectPtr<UBaseMovementModeTransition>& Transition)
 	{
-		return Transition && (Transition->IsA<URogueMantleTransition>() || Transition->IsA<URogueMantleDownTransition>() || Transition->IsA<URogueClimbTransition>());
+		return Transition && (Transition->IsA<URogueMantleTransition>() || Transition->IsA<URogueMantleDownTransition>()
+			|| Transition->IsA<URogueCornerTurnTransition>() || Transition->IsA<URogueClimbTransition>());
 	});
 	Transitions.Insert(NewObject<URogueMantleDownTransition>(this), 0);
 	Transitions.Insert(NewObject<URogueMantleTransition>(this), 1);
-	Transitions.Insert(NewObject<URogueClimbTransition>(this), 2);
+	Transitions.Insert(NewObject<URogueCornerTurnTransition>(this), 2);
+	Transitions.Insert(NewObject<URogueClimbTransition>(this), 3);
 
 	Super::InitializeComponent();
 }
@@ -93,19 +105,34 @@ void URogueCharacterMoverComponent::BeginPlay()
 	OnPreSimulationTick.AddDynamic(this, &URogueCharacterMoverComponent::HandlePreSimulationTick);
 }
 
+// Mode queries go through the active mode's gameplay tags (Mover's own IsOnGround/IsAirborne pattern), not mode names:
+// one mechanism for C++, the AnimBP (HasGameplayTag nodes), and future climb modes. The tag check reads the same sync-state
+// buffer as GetMovementModeName(), so there's no tick of disagreement between the two.
+
+bool URogueCharacterMoverComponent::IsInClimbState() const
+{
+	// Non-exact: the PARENT matches any child, i.e. any climb-family mode.
+	return HasGameplayTag(RogueSharedGameplayTags::Mover_Climb, false);
+}
+
 bool URogueCharacterMoverComponent::IsClimbing() const
 {
-	return GetMovementModeName() == URogueClimbMode::ModeName;
+	return HasGameplayTag(RogueSharedGameplayTags::Mover_Climb_Sustained, true);
 }
 
 bool URogueCharacterMoverComponent::IsMantling() const
 {
-	return GetMovementModeName() == URogueMantleMode::ModeName;
+	return HasGameplayTag(RogueSharedGameplayTags::Mover_Climb_MantleUp, true);
 }
 
 bool URogueCharacterMoverComponent::IsMantlingDown() const
 {
-	return GetMovementModeName() == URogueMantleDownMode::ModeName;
+	return HasGameplayTag(RogueSharedGameplayTags::Mover_Climb_MantleDown, true);
+}
+
+bool URogueCharacterMoverComponent::IsCornerTurning() const
+{
+	return HasGameplayTag(RogueSharedGameplayTags::Mover_Climb_CornerTurn, true);
 }
 
 namespace
@@ -205,6 +232,7 @@ void URogueCharacterMoverComponent::HandlePreSimulationTick(const FMoverTimeStep
 	RefreshClimbSurfaceInfo();
 	RefreshFootProbes();   // per-foot foothold probes + the both-feet gross-hang flag (self-gates on IsClimbing)
 	RefreshHandGrips();    // per-hand wall grip points for the Control Rig hand pins (self-gates on IsClimbing)
+	RefreshCornerProbes(); // left/right inner/outer corner detection + turn transforms (self-gates on IsClimbing)
 
 	// The up-mantle probe matters while climbing (feeds the climb->mantle top-out); the mantle-down probe matters while
 	// grounded (feeds the walk->mantle-down transition). They're mutually exclusive by state, so only one runs per tick.
@@ -287,10 +315,10 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceInfo()
 	const FVector PrevNormal = ClimbDominantSurfaceNormalCache;
 	const FVector PrevLocation = ClimbDominantSurfaceLocationCache;
 
-	// Reset cached outputs each refresh.
+	// Reset cached outputs each refresh. (bLowerBodyHanging is NOT reset here - RefreshFootProbes owns it, and freezes it
+	// through a corner turn.)
 	bFacingClimbableSurface = false;
 	bCanMoveOnWall = false;
-	bLowerBodyHanging = false;
 	ClimbDominantSurfaceNormalCache = FVector::ZeroVector;
 	ClimbDominantSurfaceLocationCache = FVector::ZeroVector;
 	LowerBodySupport = UpperBodySupport = LeftSupport = RightSupport = 0.0f;
@@ -511,6 +539,15 @@ FVector URogueCharacterMoverComponent::GetClimbSampleUpBias(const FVector& Plane
 
 void URogueCharacterMoverComponent::RefreshFootProbes()
 {
+	// Corner turn (a climb -> climb traversal): FREEZE the per-foot results and the gross hang as they were when the turn
+	// began, so IsLowerBodyHanging() / the foot flags stay true to the climb through the turn instead of reading "braced".
+	// The probes can't run meaningfully mid-turn anyway (they sweep toward one plane while the body straddles two, from
+	// foot bones the clip is swinging); they resume on the first Climbing tick after the hand-off.
+	if (IsCornerTurning())
+	{
+		return;
+	}
+
 	// Carry each foot's previous hanging state across the reset - it feeds the release hysteresis in ProbeFoot.
 	const bool bLeftWasHanging = LeftFootProbe.bHanging;
 	const bool bRightWasHanging = RightFootProbe.bHanging;
@@ -605,12 +642,14 @@ FClimbFootProbeResult URogueCharacterMoverComponent::ProbeFoot(FName FootSocketN
 
 void URogueCharacterMoverComponent::RefreshHandGrips()
 {
-	LeftHandGrip = FClimbHandGrip();
-	RightHandGrip = FClimbHandGrip();
-
 	const USceneComponent* Updated = GetUpdatedComponent();
 	if (!IsClimbing() || ClimbDominantSurfaceNormalCache.IsNearlyZero() || !Updated)
 	{
+		// No grips outside Climbing (corner turn, mantles, falling): drop bFound but KEEP the last Location/Normal. A hand pin
+		// still blending out then eases from where the hands actually were - resetting to a default struct published world
+		// ORIGIN, which the FBIK pin (pelvis translation on) dragged the whole body toward at the start of a corner turn.
+		LeftHandGrip.bFound = false;
+		RightHandGrip.bFound = false;
 		return;
 	}
 
@@ -631,7 +670,12 @@ void URogueCharacterMoverComponent::RefreshHandGrips()
 
 FClimbHandGrip URogueCharacterMoverComponent::ProbeHandGrip(const FVector& Anchor, const FVector& WallNormal) const
 {
+	// Default (no grip found) to the anchor projected onto the climb plane rather than a zero vector, so Location is always
+	// a sensible nearby point - a consumer that blends on bFound never sees a world-origin target mid-blend.
 	FClimbHandGrip Grip;
+	const FVector PlanePoint = ClimbDominantSurfaceLocationCache;
+	Grip.Location = Anchor - WallNormal * FVector::DotProduct(Anchor - PlanePoint, WallNormal) + WallNormal * HandGripSurfaceGap;
+	Grip.Normal = WallNormal;
 	if (!GetWorld())
 	{
 		return Grip;
@@ -669,6 +713,475 @@ FClimbHandGrip URogueCharacterMoverComponent::ProbeHandGrip(const FVector& Ancho
 #endif
 
 	return Grip;
+}
+
+void URogueCharacterMoverComponent::RefreshCornerProbes()
+{
+	LeftCorner = FClimbCornerProbeResult();
+	RightCorner = FClimbCornerProbeResult();
+
+	if (!IsClimbing() || ClimbDominantSurfaceNormalCache.IsNearlyZero() || !GetUpdatedComponent())
+	{
+		return;
+	}
+
+	// Both sides every tick, independent of the stick: availability is published like the mantle-down affordance, and
+	// whichever design consumes it (montage traversal or input-driven strikes) just reads the side it needs.
+	LeftCorner = ProbeCorner(-1.0f);
+	RightCorner = ProbeCorner(1.0f);
+}
+
+FClimbCornerProbeResult URogueCharacterMoverComponent::ProbeCorner(float Side) const
+{
+	FClimbCornerProbeResult Result;
+
+	const USceneComponent* Updated = GetUpdatedComponent();
+	const UWorld* World = GetWorld();
+	if (!Updated || !World)
+	{
+		return Result;
+	}
+
+#if ENABLE_DRAW_DEBUG
+	const bool bDebug = CVarClimbingDebugDrawing.GetValueOnGameThread();
+#endif
+
+	float CapR = ClimbDetectionCapsuleRadius;
+	float CapHH = ClimbDetectionCapsuleHalfHeight;
+	if (const UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(Updated))
+	{
+		CapR = Capsule->GetScaledCapsuleRadius();
+		CapHH = Capsule->GetScaledCapsuleHalfHeight();
+	}
+	const float Standoff = (CornerWallStandoff > 0.0f) ? CornerWallStandoff : CapR;
+
+	// Current wall basis - same convention as the climb mode, so "right" here is the stick's +Y while climbing.
+	const FVector N1 = ClimbDominantSurfaceNormalCache;
+	const FVector P1 = ClimbDominantSurfaceLocationCache;
+	const FVector Up = GetUpDirection();
+	FVector WallUp = (Up - Up.ProjectOnToNormal(N1)).GetSafeNormal();
+	if (WallUp.IsNearlyZero()) { WallUp = Up; }
+	const FVector WallRight = FVector::CrossProduct(N1, WallUp).GetSafeNormal();
+	const FVector SideDir = WallRight * Side;
+	const FVector Center = Updated->GetComponentLocation();
+	const float SameFaceDot = FMath::Cos(FMath::DegreesToRadians(MaxClimbNormalDeviationDegrees));
+
+	// --- Stage 1: find the side face at the HAND ROW ---
+	// Same height as the coverage grid's top row (ClimbGridTopOffset + the climb up-bias along the wall), so the probe and
+	// the climb agree on where the hands are. Only the hands matter: a valid climb needs just the hand row, and while
+	// hanging both faces may exist only up there - any lower probe would read the void as "no corner" (or a false edge).
+	const FVector Origin = Center + WallUp * ClimbGridTopOffset + GetClimbSampleUpBias(N1);
+	const float Gap = FVector::DotProduct(Origin - P1, N1); // perpendicular distance to the current face at the hands
+
+	ERogueClimbCornerType Type = ERogueClimbCornerType::None;
+	FHitResult FaceHit;
+
+	// (a) INNER: a side ray, in front of the face. Anything it hits is either the concave corner's wall (it must face back
+	// at us and be climbable) or an obstruction - and an obstruction rules out an outer corner on this side too.
+	const FVector InnerEnd = Origin + SideDir * (CapR + CornerInnerArmDistance);
+	FHitResult InnerHit;
+	if (World->LineTraceSingleByChannel(InnerHit, Origin, InnerEnd, ECC_WorldStatic, ClimbQueryParams))
+	{
+		const bool bValid = IsSurfaceClimbable(FVector::DotProduct(InnerHit.ImpactNormal, Up))
+			&& FVector::DotProduct(InnerHit.ImpactNormal, SideDir) < 0.0f;
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugLine(World, Origin, InnerHit.ImpactPoint, bValid ? FColor::Yellow : FColor::Red, false, -1.0f, 0, 1.0f);
+		}
+#endif
+		if (!bValid)
+		{
+			return Result;
+		}
+		Type = ERogueClimbCornerType::Inner;
+		FaceHit = InnerHit;
+	}
+	else
+	{
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugLine(World, Origin, InnerEnd, FColor::Silver, false, -1.0f, 0, 0.5f);
+		}
+#endif
+		// (b) OUTER edge test: a forward ray at the arm distance. If the SAME face is still there, the wall continues past
+		// our reach on this side - no corner. (Cheap gate: the wrap ray below only fires at an actual edge.) We're climbing,
+		// so our own face exists at the hands - a miss here really is the face ending beside us, not a void below.
+		const FVector EdgeOrigin = Origin + SideDir * CornerOuterArmDistance;
+		const FVector EdgeEnd = EdgeOrigin - N1 * (Gap + CornerOuterWrapDepth);
+		FHitResult EdgeHit;
+		const bool bEdgeHit = World->LineTraceSingleByChannel(EdgeHit, EdgeOrigin, EdgeEnd, ECC_WorldStatic, ClimbQueryParams);
+		const bool bFaceContinues = bEdgeHit && FVector::DotProduct(EdgeHit.ImpactNormal, N1) >= SameFaceDot;
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugLine(World, EdgeOrigin, bEdgeHit ? EdgeHit.ImpactPoint : EdgeEnd, bFaceContinues ? FColor::Silver : FColor::Orange, false, -1.0f, 0, 0.5f);
+		}
+#endif
+		if (bFaceContinues)
+		{
+			return Result;
+		}
+
+		// (c) OUTER wrap ray - the mantle-down backward-ray trick turned 90deg: start PAST the edge and BEHIND the face's
+		// plane, fire back toward the body. The first climbable hit is the side face; its normal points the way we were
+		// moving (+SideDir), which is what makes it convex.
+		const FVector WrapStart = EdgeEnd + SideDir * CornerOuterWrapOut;
+		const FVector WrapEnd = WrapStart - SideDir * (CornerOuterArmDistance + CornerOuterWrapOut);
+		FHitResult WrapHit;
+		const bool bWrapHit = World->LineTraceSingleByChannel(WrapHit, WrapStart, WrapEnd, ECC_WorldStatic, ClimbQueryParams);
+		const bool bValid = bWrapHit && !WrapHit.bStartPenetrating
+			&& IsSurfaceClimbable(FVector::DotProduct(WrapHit.ImpactNormal, Up))
+			&& FVector::DotProduct(WrapHit.ImpactNormal, SideDir) > 0.0f;
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugLine(World, WrapStart, bWrapHit ? WrapHit.ImpactPoint : WrapEnd, bValid ? FColor::Yellow : FColor::Red, false, -1.0f, 0, 1.0f);
+		}
+#endif
+		if (!bValid)
+		{
+			return Result;
+		}
+		Type = ERogueClimbCornerType::Outer;
+		FaceHit = WrapHit;
+	}
+
+	const FVector N2 = FaceHit.ImpactNormal;
+	const FVector P2 = FaceHit.ImpactPoint;
+	Result.Type = Type;
+	Result.NewWallNormal = N2;
+	Result.NewWallLocation = P2;
+	Result.TurnDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(N1, N2), -1.0f, 1.0f)));
+
+	// --- Stage 2: the corner frame ---
+	// The corner is the exact intersection line of the two planes (no edge scan needed). Orient it upward and slide it to
+	// the character's height, so the turn happens where we are.
+	FVector LinePoint, LineDir;
+	if (Result.TurnDegrees < CornerMinTurnDegrees || Result.TurnDegrees > CornerMaxTurnDegrees
+		|| !FMath::IntersectPlanes2(LinePoint, LineDir, FPlane(P1, N1), FPlane(P2, N2)))
+	{
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugString(World, P2, FString::Printf(TEXT("corner %.0f deg (out of range)"), Result.TurnDegrees), nullptr, FColor::Red, 0.0f);
+		}
+#endif
+		return Result;
+	}
+	if (FVector::DotProduct(LineDir, Up) < 0.0f)
+	{
+		LineDir = -LineDir;
+	}
+	const FVector Corner = LinePoint + LineDir * FVector::DotProduct(Center - LinePoint, LineDir);
+	Result.CornerPoint = Corner;
+	Result.CornerDirection = LineDir;
+
+	// Same orientation rule as the climb mode: up follows the face's up-slope, forward faces into it.
+	auto MakeFacingQuat = [&Up](const FVector& FaceNormal)
+	{
+		FVector FaceUp = (Up - Up.ProjectOnToNormal(FaceNormal)).GetSafeNormal();
+		if (FaceUp.IsNearlyZero()) { FaceUp = Up; }
+		return FRotationMatrix::MakeFromZX(FaceUp, -FaceNormal).ToQuat();
+	};
+
+	// End (strike 2): on the new face, Standoff off it, and EndOffset along it AWAY from the corner. Face 2 extends out in
+	// front of the old face for an inner corner (+N1) and behind it for an outer one (-N1); the in-plane direction is
+	// built from the line (not N1 directly) so it stays on the face for non-90deg corners and tilted walls.
+	FVector Away2 = FVector::CrossProduct(LineDir, N2).GetSafeNormal();
+	const FVector Extent2 = (Type == ERogueClimbCornerType::Inner) ? N1 : -N1;
+	if (FVector::DotProduct(Away2, Extent2) < 0.0f)
+	{
+		Away2 = -Away2;
+	}
+	const float EndOffset = (Type == ERogueClimbCornerType::Inner) ? CornerInnerEndOffset : CornerOuterEndOffset;
+	const FQuat EndQuat = MakeFacingQuat(N2);
+	const FVector EndLoc = Corner + N2 * Standoff + Away2 * EndOffset;
+	Result.EndTransform = FTransform(EndQuat, EndLoc);
+
+	// Mid (strike 1): rounding the corner, facing into the bisector. Inner: Standoff off BOTH faces (nestled in the
+	// corner) -> distance Standoff / cos(theta/2) along the bisector. Outer: orbiting the edge line at radius Standoff.
+	const FVector Bisector = (N1 + N2).GetSafeNormal();
+	const float HalfCos = FMath::Cos(FMath::DegreesToRadians(Result.TurnDegrees * 0.5f));
+	const float MidDistance = (Type == ERogueClimbCornerType::Inner) ? Standoff / FMath::Max(HalfCos, 0.1f) : Standoff;
+	const FQuat MidQuat = MakeFacingQuat(Bisector);
+	const FVector MidLoc = Corner + Bisector * MidDistance;
+	Result.MidTransform = FTransform(MidQuat, MidLoc);
+
+	// --- Stage 3: validation (the always-succeed contract) ---
+	// (a) Both poses fit. Shrunk by a skin so resting one radius off a face isn't an overlap.
+	const FCollisionShape FitCapsule = FCollisionShape::MakeCapsule(FMath::Max(CapR - CornerFitSkin, 1.0f), FMath::Max(CapHH - CornerFitSkin, CapR - CornerFitSkin));
+	const bool bMidFits = !World->OverlapAnyTestByChannel(MidLoc, MidQuat, ECC_WorldStatic, FitCapsule, ClimbQueryParams);
+	const bool bEndFits = !World->OverlapAnyTestByChannel(EndLoc, EndQuat, ECC_WorldStatic, FitCapsule, ClimbQueryParams);
+
+	// (b) Hand purchase on the new face: replay the coverage grid's TOP (hand) row from the End pose, so the climb grid is
+	// guaranteed to accept the face at hand-off - and require the MOVE threshold, so a turn never strands you in a cling.
+	const int32 Cols = FMath::Max(1, ClimbGridColumns);
+	const float ColStep = (Cols > 1) ? (ClimbGridHalfWidth * 2.0f) / (Cols - 1) : 0.0f;
+	const FVector EndUp = EndQuat.GetUpVector();
+	const FVector EndRight = FVector::CrossProduct(N2, EndUp).GetSafeNormal();
+	const FVector RowBase = EndLoc + EndUp * ClimbGridTopOffset + GetClimbSampleUpBias(N2);
+	int32 HandHits = 0;
+	for (int32 Col = 0; Col < Cols; ++Col)
+	{
+		const FVector RowOrigin = RowBase + EndRight * (-ClimbGridHalfWidth + Col * ColStep);
+		const FVector RowEnd = RowOrigin - N2 * ClimbSampleReach;
+		FHitResult RowHit;
+		const bool bRowHit = World->LineTraceSingleByChannel(RowHit, RowOrigin, RowEnd, ECC_WorldStatic, ClimbQueryParams);
+		const bool bRowValid = bRowHit && IsSurfaceClimbable(FVector::DotProduct(RowHit.ImpactNormal, Up))
+			&& FVector::DotProduct(RowHit.ImpactNormal, N2) >= SameFaceDot;
+		HandHits += bRowValid ? 1 : 0;
+#if ENABLE_DRAW_DEBUG
+		if (bDebug)
+		{
+			DrawDebugLine(World, RowOrigin, bRowHit ? RowHit.ImpactPoint : RowEnd, bRowValid ? FColor::Green : FColor::Red, false, -1.0f, 0, 0.5f);
+		}
+#endif
+	}
+	const bool bHandPurchase = HandHits >= FMath::Min(ClimbTopRowMinHitsToMove, Cols);
+
+	Result.bAvailable = bMidFits && bEndFits && bHandPurchase;
+
+#if ENABLE_DRAW_DEBUG
+	if (bDebug)
+	{
+		// Corner line (white), Mid ghost (cyan / red if blocked), End ghost (green = available, orange = fits but the new
+		// face lacks hand purchase, red = blocked), facing arrows, and a type/angle label above the corner.
+		DrawDebugLine(World, Corner - LineDir * 100.0f, Corner + LineDir * 100.0f, FColor::White, false, -1.0f, 0, 2.0f);
+		DrawDebugCapsule(World, MidLoc, CapHH, CapR, MidQuat, bMidFits ? FColor::Cyan : FColor::Red, false, -1.0f, 0, 1.0f);
+		DrawDebugDirectionalArrow(World, MidLoc, MidLoc - Bisector * 40.0f, 8.0f, FColor::Cyan, false, -1.0f, 0, 1.5f);
+		const FColor EndColor = Result.bAvailable ? FColor::Green : (bEndFits ? FColor::Orange : FColor::Red);
+		DrawDebugCapsule(World, EndLoc, CapHH, CapR, EndQuat, EndColor, false, -1.0f, 0, 1.0f);
+		DrawDebugDirectionalArrow(World, EndLoc, EndLoc - N2 * 40.0f, 8.0f, EndColor, false, -1.0f, 0, 1.5f);
+		const FString Label = FString::Printf(TEXT("%s %s %.0f deg"), Side > 0.0f ? TEXT("R") : TEXT("L"),
+			Type == ERogueClimbCornerType::Inner ? TEXT("INNER") : TEXT("OUTER"), Result.TurnDegrees);
+		DrawDebugString(World, Corner + LineDir * 110.0f, Label, nullptr, EndColor, 0.0f);
+	}
+#endif
+
+	return Result;
+}
+
+UAnimSequence* URogueCharacterMoverComponent::GetCornerTurnAnimationFor(ERogueClimbCornerType Type, bool bRight) const
+{
+	switch (Type)
+	{
+	case ERogueClimbCornerType::Inner: return bRight ? CornerInnerRightAnimation : CornerInnerLeftAnimation;
+	case ERogueClimbCornerType::Outer: return bRight ? CornerOuterRightAnimation : CornerOuterLeftAnimation;
+	default:                           return nullptr;
+	}
+}
+
+bool URogueCharacterMoverComponent::CanBeginCornerTurn(bool bRight) const
+{
+	const FClimbCornerProbeResult& Corner = bRight ? RightCorner : LeftCorner;
+	return Corner.bAvailable && GetCornerTurnAnimationFor(Corner.Type, bRight) && CacheOwnerCharacter && CacheOwnerCharacter->GetMesh();
+}
+
+bool URogueCharacterMoverComponent::BeginCornerTurn(bool bRight)
+{
+	const FClimbCornerProbeResult Corner = bRight ? RightCorner : LeftCorner;
+	UAnimSequence* Animation = GetCornerTurnAnimationFor(Corner.Type, bRight);
+	const USceneComponent* Updated = GetUpdatedComponent();
+	const USkeletalMeshComponent* Mesh = CacheOwnerCharacter ? CacheOwnerCharacter->GetMesh() : nullptr;
+	if (!Corner.bAvailable || !Animation || !Updated || !Mesh)
+	{
+		return false;
+	}
+
+	CornerTurn = FRogueCornerTurnState();
+	CornerTurn.Animation = Animation;
+	CornerTurn.Type = Corner.Type;
+	CornerTurn.Side = bRight ? 1.0f : -1.0f;
+	CornerTurn.MeshRelative = Mesh->GetRelativeTransform();
+	// (The hang state needs no latch here: RefreshFootProbes freezes it - and the foot flags - for the whole turn.)
+
+	// Rests: clip start (= the climb idle), the authored 4-limb corner rest (named notify), clip end (= climb on the new face).
+	const double Length = Animation->GetPlayLength();
+	double RestTime = Length * 0.5;
+	bool bFoundRest = false;
+	for (const FAnimNotifyEvent& Notify : Animation->Notifies)
+	{
+		if (Notify.NotifyName == CornerTurnRestNotifyName)
+		{
+			RestTime = Notify.GetTriggerTime();
+			bFoundRest = true;
+			break;
+		}
+	}
+	if (!bFoundRest)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Corner turn: '%s' has no '%s' notify - using mid-clip as the corner rest."), *GetNameSafe(Animation), *CornerTurnRestNotifyName.ToString());
+	}
+	RestTime = FMath::Clamp(RestTime, UE_KINDA_SMALL_NUMBER, Length - UE_KINDA_SMALL_NUMBER);
+
+	CornerTurn.RestTimes[0] = 0.0;
+	CornerTurn.RestTimes[1] = RestTime;
+	CornerTurn.RestTimes[2] = Length;
+	CornerTurn.CommitTimes[0] = FMath::Lerp(CornerTurn.RestTimes[0], CornerTurn.RestTimes[1], static_cast<double>(CornerTurnStrike1CommitFraction));
+	CornerTurn.CommitTimes[1] = FMath::Lerp(CornerTurn.RestTimes[1], CornerTurn.RestTimes[2], static_cast<double>(CornerTurnStrike2CommitFraction));
+
+	CornerTurn.OldWallNormal = ClimbDominantSurfaceNormalCache;
+	CornerTurn.OldWallLocation = ClimbDominantSurfaceLocationCache;
+	CornerTurn.NewWallNormal = Corner.NewWallNormal;
+	CornerTurn.NewWallLocation = Corner.NewWallLocation;
+
+	// Per-strike warp, fixed for the whole turn: strike 1 = here -> Mid, strike 2 = Mid -> End. Cache where the UNWARPED
+	// clip would end each strike (and how far it rotates) - the warp maps that onto the target.
+	CornerTurn.StrikeStart[0] = FTransform(Updated->GetComponentQuat(), Updated->GetComponentLocation());
+	CornerTurn.StrikeTarget[0] = Corner.MidTransform;
+	CornerTurn.StrikeStart[1] = Corner.MidTransform;
+	CornerTurn.StrikeTarget[1] = Corner.EndTransform;
+	for (int32 Strike = 0; Strike < 2; ++Strike)
+	{
+		CornerTurn.StrikeClipEnd[Strike] = ComputeCornerClipCapsule(Strike, CornerTurn.RestTimes[Strike + 1]);
+		CornerTurn.StrikeClipAngle[Strike] = CornerTurn.StrikeStart[Strike].GetRotation().AngularDistance(CornerTurn.StrikeClipEnd[Strike].GetRotation());
+	}
+
+	return true;
+}
+
+FTransform URogueCharacterMoverComponent::ComputeCornerClipCapsule(int32 Strike, double Time) const
+{
+	const FRogueCornerTurnState& State = CornerTurn;
+	if (!State.Animation)
+	{
+		return State.StrikeStart[Strike];
+	}
+
+	// Root motion is a MESH-space delta (relative to the root at the strike start): with the root locked, the mesh moves by
+	// it - MeshWorld(t) = Delta * MeshWorld(start) - and MeshWorld = MeshRelative * Capsule. Solving for the capsule:
+	//   Capsule(t) = MeshRelative^-1 * Delta * MeshRelative * Capsule(start)
+	// (conjugating by MeshRelative handles the mesh's -90deg yaw and its pivot below the capsule centre).
+	const FTransform Delta = State.Animation->ExtractRootMotionFromRange(State.RestTimes[Strike], Time, FAnimExtractContext());
+	return State.MeshRelative.Inverse() * Delta * State.MeshRelative * State.StrikeStart[Strike];
+}
+
+FTransform URogueCharacterMoverComponent::EvaluateCornerTurnStrike(int32 Strike, double Time) const
+{
+	const FRogueCornerTurnState& State = CornerTurn;
+	const FTransform& Start = State.StrikeStart[Strike];
+	const FTransform& Target = State.StrikeTarget[Strike];
+	const FTransform& ClipEnd = State.StrikeClipEnd[Strike];
+	const FTransform Clip = ComputeCornerClipCapsule(Strike, Time);
+
+	const double StrikeStartTime = State.RestTimes[Strike];
+	const double Span = State.RestTimes[Strike + 1] - StrikeStartTime;
+	const double TimeAlpha = (Span > UE_KINDA_SMALL_NUMBER) ? FMath::Clamp((Time - StrikeStartTime) / Span, 0.0, 1.0) : 1.0;
+
+	// Translation - SkewWarp's idea as a pure function of time: a rank-one linear map that takes the clip's total strike
+	// translation onto the target's. Each instant is corrected in proportion to its progress ALONG the clip's own motion,
+	// so the correction rides the clip (none while the body is still during a reach) and lands exactly on the target.
+	const FVector StartLocation = Start.GetLocation();
+	const FVector ClipDelta = Clip.GetLocation() - StartLocation;
+	const FVector ClipTotal = ClipEnd.GetLocation() - StartLocation;
+	const FVector TargetTotal = Target.GetLocation() - StartLocation;
+	const double ClipTotalSq = ClipTotal.SizeSquared();
+	const double Alpha = (ClipTotalSq > 1.0) ? FVector::DotProduct(ClipDelta, ClipTotal) / ClipTotalSq : TimeAlpha;
+	const FVector Location = StartLocation + ClipDelta + (TargetTotal - ClipTotal) * Alpha;
+
+	// Rotation - the clip's own turn, plus the residual (target vs the unwarped clip end) blended in by rotational progress.
+	const FQuat Correction = Target.GetRotation() * ClipEnd.GetRotation().Inverse();
+	const double Beta = (State.StrikeClipAngle[Strike] > 0.01f)
+		? FMath::Clamp(Start.GetRotation().AngularDistance(Clip.GetRotation()) / State.StrikeClipAngle[Strike], 0.0, 1.0)
+		: TimeAlpha;
+	const FQuat Rotation = FQuat::Slerp(FQuat::Identity, Correction, Beta) * Clip.GetRotation();
+
+	return FTransform(Rotation.GetNormalized(), Location);
+}
+
+ERogueCornerTurnStep URogueCharacterMoverComponent::AdvanceCornerTurn(float StickY, float DeltaSeconds, FTransform& OutCapsuleTarget)
+{
+	FRogueCornerTurnState& State = CornerTurn;
+	const USceneComponent* Updated = GetUpdatedComponent();
+	if (!State.Animation || !Updated)
+	{
+		if (Updated)
+		{
+			OutCapsuleTarget = FTransform(Updated->GetComponentQuat(), Updated->GetComponentLocation());
+		}
+		return ERogueCornerTurnStep::FinishedOnOldFace;
+	}
+
+	constexpr double RestTolerance = 1e-4;
+	const double Rest0 = State.RestTimes[0];
+	const double Rest1 = State.RestTimes[1];
+	const double Rest2 = State.RestTimes[2];
+
+	// + = forward through the turn. "Right" stays right relative to the character all the way round, so holding the same
+	// stick direction that entered the corner keeps going.
+	const float Push = StickY * State.Side;
+	const bool bDriving = FMath::Abs(Push) > CornerTurnInputDeadzone && (Push > 0.0f || bCornerTurnAllowReverse);
+
+	double Time = State.Playhead;
+	if (bDriving)
+	{
+		// The stick drives the playhead (partial push = slower, like the climb playrate). Body and pose both follow it.
+		Time += Push * CornerTurnPlayRate * DeltaSeconds;
+	}
+	else if (FMath::Abs(Time - Rest1) > RestTolerance && Time > Rest0 && Time < Rest2)
+	{
+		// Released mid-strike: settle to the nearest rest, forward or back depending on the strike's commit point.
+		const bool bFirstStrike = Time < Rest1;
+		const double Commit = State.CommitTimes[bFirstStrike ? 0 : 1];
+		const double Step = CornerTurnSettlePlayRate * DeltaSeconds;
+		Time = (Time >= Commit)
+			? FMath::Min(Time + Step, bFirstStrike ? Rest1 : Rest2)
+			: FMath::Max(Time - Step, bFirstStrike ? Rest0 : Rest1);
+	}
+	Time = FMath::Clamp(Time, Rest0, Rest2);
+
+	State.Playhead = Time;
+	State.bHolding = !bDriving && FMath::Abs(Time - Rest1) <= RestTolerance;
+
+	// Strike 1 covers [Rest0, Rest1], strike 2 [Rest1, Rest2]; both evaluate to the Mid target exactly at Rest1.
+	const int32 Strike = (Time <= Rest1) ? 0 : 1;
+	OutCapsuleTarget = EvaluateCornerTurnStrike(Strike, Time);
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarClimbingDebugDrawing.GetValueOnGameThread())
+	{
+		float CapR = ClimbDetectionCapsuleRadius;
+		float CapHH = ClimbDetectionCapsuleHalfHeight;
+		if (const UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(Updated))
+		{
+			CapR = Capsule->GetScaledCapsuleRadius();
+			CapHH = Capsule->GetScaledCapsuleHalfHeight();
+		}
+		// Warp targets (cyan Mid, green End) vs where the UNWARPED clip would end each strike (silver): the gap between a
+		// target and its silver ghost is how much the warp is correcting - tune the probe offsets to shrink it.
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			const FTransform& StrikeTarget = State.StrikeTarget[Index];
+			const FTransform& ClipEnd = State.StrikeClipEnd[Index];
+			DrawDebugCapsule(GetWorld(), StrikeTarget.GetLocation(), CapHH, CapR, StrikeTarget.GetRotation(), Index == 0 ? FColor::Cyan : FColor::Green, false, -1.0f, 0, 1.0f);
+			DrawDebugCapsule(GetWorld(), ClipEnd.GetLocation(), CapHH, CapR, ClipEnd.GetRotation(), FColor::Silver, false, -1.0f, 0, 0.5f);
+			DrawDebugLine(GetWorld(), ClipEnd.GetLocation(), StrikeTarget.GetLocation(), FColor::Silver, false, -1.0f, 0, 0.5f);
+		}
+		DrawDebugCapsule(GetWorld(), OutCapsuleTarget.GetLocation(), CapHH, CapR, OutCapsuleTarget.GetRotation(), State.bHolding ? FColor::Magenta : FColor::Yellow, false, -1.0f, 0, 1.5f);
+	}
+#endif
+
+	if (Time >= Rest2 - RestTolerance)
+	{
+		return ERogueCornerTurnStep::FinishedOnNewFace;
+	}
+	if (Time <= Rest0 + RestTolerance && !(bDriving && Push > 0.0f))
+	{
+		return ERogueCornerTurnStep::FinishedOnOldFace;
+	}
+	return ERogueCornerTurnStep::InProgress;
+}
+
+void URogueCharacterMoverComponent::FinishCornerTurn(bool bOntoNewFace)
+{
+	// Seed (snap) the climb plane to the face we're resuming on. Without this, RefreshClimbSurfaceInfo would VInterp from
+	// whatever it sampled mid-turn (visibly swinging the capsule after the clip already turned it) and stack the first
+	// grid on a stale plane - a false "can't climb" there trips the climb transition's exit-to-Falling.
+	ClimbDominantSurfaceNormalCache = bOntoNewFace ? CornerTurn.NewWallNormal : CornerTurn.OldWallNormal;
+	ClimbDominantSurfaceLocationCache = bOntoNewFace ? CornerTurn.NewWallLocation : CornerTurn.OldWallLocation;
+	CornerTurn.bHolding = false;
 }
 
 void URogueCharacterMoverComponent::RefreshMantleProbe()

@@ -3,6 +3,7 @@
 #include "RogueClimbMode.h"
 
 #include "RogueCharacterMoverComponent.h"
+#include "RogueSharedGameplayTags.h"
 #include "Components/CapsuleComponent.h"
 #include "MoverComponent.h"
 #include "MoverDataModelTypes.h"
@@ -20,6 +21,9 @@ URogueClimbMode::URogueClimbMode(const FObjectInitializer& ObjectInitializer)
 {
 	// Reuse the common legacy settings for turning rate, verticality, etc. (climb speed/accel are our own props).
 	SharedSettingsClasses.Add(UCommonLegacyMovementSettings::StaticClass());
+
+	// Mode tag (child of Mover.Climb - see URogueCharacterMoverComponent::IsInClimbState / IsClimbing).
+	GameplayTags.AddTag(RogueSharedGameplayTags::Mover_Climb_Sustained);
 }
 
 void URogueClimbMode::GenerateMove_Implementation(const FMoverTickStartData& StartState, const FMoverTimeStep& TimeStep, FProposedMove& OutProposedMove) const

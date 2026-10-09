@@ -8,6 +8,7 @@
 #include "RogueCharacterMoverComponent.generated.h"
 
 class UAnimMontage;
+class UAnimSequence;
 class UMotionWarpingComponent;
 
 /** One sample of the climb coverage grid: a short forward probe at one grid cell. */
@@ -55,16 +56,112 @@ struct FClimbHandGrip
 {
 	GENERATED_BODY()
 
-	// True when a climbable grip was found for this hand; Location/Normal are meaningful only then (pin weight 0 otherwise).
+	// True when a climbable grip was found for this hand this tick. Drive the pin weight off it (smoothed): it is false
+	// whenever not Climbing (incl. the corner turn, where the clip moves the hands), so the pins must blend OUT on it.
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
 	bool bFound = false;
 
-	// World grip point (sweep contact on the wall) and its surface normal - the hand effector target + facing.
+	// World grip point (sweep contact on the wall) and its surface normal - the hand effector target + facing. Always a
+	// sensible nearby point, even when !bFound: the anchor projected onto the wall while climbing, else the last grip
+	// (frozen when leaving Climbing) - so a pin blending out never targets world origin.
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
 	FVector Location = FVector::ZeroVector;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing")
 	FVector Normal = FVector::ZeroVector;
+};
+
+/** Which kind of corner a side probe found. Inner = concave (the new wall faces back at you), outer = convex (the face wraps away). */
+UENUM(BlueprintType)
+enum class ERogueClimbCornerType : uint8
+{
+	None,
+	Inner,
+	Outer
+};
+
+/**
+ * Per-side corner-turn probe result (refreshed each pre-sim tick while climbing). Everything is expressed in the CORNER
+ * FRAME: the corner line is the exact intersection of the current climb plane and the detected side face, and the two
+ * transforms are built off it - Mid = rounding the corner (facing the bisector; the clip's first strike), End = on the
+ * new face in the climb mode's pose (the second strike / the climb hand-off). Capsule-centre transforms.
+ */
+USTRUCT(BlueprintType)
+struct FClimbCornerProbeResult
+{
+	GENERATED_BODY()
+
+	// True when a corner of a supported angle was found on this side AND both transforms fit AND the new face has enough
+	// hand purchase to keep climbing (the always-succeed contract - a commit while this is true can't strand you).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	bool bAvailable = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	ERogueClimbCornerType Type = ERogueClimbCornerType::None;
+
+	// Angle between the current wall normal and the new face normal (90 = a square corner).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	float TurnDegrees = 0.0f;
+
+	// A point on the corner line at the character's height, and the line direction (oriented upward).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FVector CornerPoint = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FVector CornerDirection = FVector::ZeroVector;
+
+	// The new face's plane (from the hand-row probe hit).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FVector NewWallNormal = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FVector NewWallLocation = FVector::ZeroVector;
+
+	// Strike 1: at the corner, facing into the bisector of the two faces.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FTransform MidTransform = FTransform::Identity;
+
+	// Strike 2: on the new face, oriented exactly like the climb mode (MakeFromZX(WallUp2, -N2)).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner")
+	FTransform EndTransform = FTransform::Identity;
+};
+
+/** Outcome of one corner-turn tick (URogueCharacterMoverComponent::AdvanceCornerTurn). */
+enum class ERogueCornerTurnStep : uint8
+{
+	InProgress,
+	FinishedOnNewFace,   // playhead reached the clip end -> climb the new face
+	FinishedOnOldFace    // settled/reversed back to the clip start -> climb the original face
+};
+
+/**
+ * Live state of an in-progress corner turn (set by BeginCornerTurn, advanced by AdvanceCornerTurn). The playhead is the
+ * single driver of BOTH the capsule (the clip's root path, warped) and the pose (the AnimBP evaluates the clip at it).
+ * Two strikes: [Rest0 -> Rest1] warps onto the probe's Mid, [Rest1 -> Rest2] onto its End.
+ */
+struct FRogueCornerTurnState
+{
+	TObjectPtr<UAnimSequence> Animation = nullptr;
+	ERogueClimbCornerType Type = ERogueClimbCornerType::None;
+	float Side = 1.0f;                           // +1 right / -1 left (stick Y sign that drives forward)
+
+	double Playhead = 0.0;
+	double RestTimes[3] = { 0.0, 0.0, 0.0 };     // clip start / the 4-limb corner rest / clip end
+	double CommitTimes[2] = { 0.0, 0.0 };        // per strike: released before -> settle back, after -> settle forward
+	bool bHolding = false;                       // stopped at the corner rest (Rest1) with no input - drives the breathing additive
+
+	// Per strike: capsule pose at the strike start, the warp target, and where the UNWARPED clip would end (cached at commit).
+	FTransform StrikeStart[2];
+	FTransform StrikeTarget[2];
+	FTransform StrikeClipEnd[2];
+	float StrikeClipAngle[2] = { 0.0f, 0.0f };   // the clip's own rotation over the strike (radians) - rotation-warp progress
+	FTransform MeshRelative;                     // mesh-in-capsule transform (root motion lives in mesh space)
+
+	// Both faces' planes, to seed the climb plane on whichever face we finish on.
+	FVector OldWallNormal = FVector::ZeroVector;
+	FVector OldWallLocation = FVector::ZeroVector;
+	FVector NewWallNormal = FVector::ZeroVector;
+	FVector NewWallLocation = FVector::ZeroVector;
 };
 
 /**
@@ -106,7 +203,8 @@ public:
 
 	// True when the WHOLE lower body should hang (drives the dead-hang upper body): BOTH feet lack a reachable foothold
 	// (per the per-foot probes). A single foot over a void does NOT trigger this - it stays braced and is resolved
-	// per-foot (see the foot probes). The AnimBP time-smooths this into the hang blend alpha. Meaningful while climbing.
+	// per-foot (see the foot probes). The AnimBP time-smooths this into the hang blend alpha. Meaningful while climbing,
+	// and FROZEN through a corner turn (value from when the turn began), so one bool drives the hang in both states.
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsLowerBodyHanging() const { return bLowerBodyHanging; }
 
@@ -119,9 +217,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsRightFootHanging() const { return RightFootProbe.bHanging; }
 
-	// True while the climb movement mode is the active movement mode.
+	// True while the climb movement mode is the active movement mode (the sustained climb ONLY - see IsInClimbState).
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsClimbing() const;
+
+	// True in ANY climb-family mode: climb, mantle up, mantle down, corner turn. Each of those modes carries one child of
+	// the Mover.Climb gameplay tag (Mover.Climb.Sustained/MantleUp/MantleDown/CornerTurn) - the same mechanism as Mover's own
+	// IsOnGround()/IsAirborne() - and this matches the parent, so a future climb mode joins by adding its own child tag in
+	// its constructor, and callers (AnimBP, gameplay) never need updating. The per-mode Is* queries match their child exact.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
+	bool IsInClimbState() const;
 	
 	// Climb move intent in wall-relative axes for the climb blendspace: X = up(+)/down(-) the wall, Y = right(+)/left(-).
 	// Derived from GetMovementIntent() projected onto the wall basis, then circle->square remapped so full diagonals
@@ -230,6 +335,53 @@ public:
 	// false (skipped) if the montage/warp component is missing.
 	bool BeginMantleDown();
 
+	// --- Corner turns ---
+
+	// Corner probe result for one side (bRight = WallRight side, else left). Refreshed while climbing; see FClimbCornerProbeResult.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	FClimbCornerProbeResult GetClimbCorner(bool bRight) const { return bRight ? RightCorner : LeftCorner; }
+
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	bool IsCornerTurnAvailable(bool bRight) const { return bRight ? RightCorner.bAvailable : LeftCorner.bAvailable; }
+
+	// True while the corner-turn movement mode is active.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	bool IsCornerTurning() const;
+
+	// The corner clip being played and its playhead (seconds). Feed BOTH to a Sequence Evaluator (explicit time) in the
+	// AnimBP: the capsule is already at the clip's (warped) root pose for this exact time, so pose and body stay locked.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	UAnimSequence* GetCornerTurnAnimation() const { return CornerTurn.Animation; }
+
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	float GetCornerTurnPlayhead() const { return static_cast<float>(CornerTurn.Playhead); }
+
+	// True while stopped at the corner rest (the 4-limb pose) with no input: ramp the breathing additive in on this.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	bool IsCornerTurnHolding() const { return IsCornerTurning() && CornerTurn.bHolding; }
+
+	// Kept for existing AnimBP use: identical to IsLowerBodyHanging() during a turn (which now stays frozen through it),
+	// false otherwise. Prefer IsLowerBodyHanging() everywhere so one smoothed alpha spans climb <-> corner without a reset.
+	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
+	bool IsCornerTurnLowerBodyHanging() const { return IsCornerTurning() && bLowerBodyHanging; }
+
+	float GetCornerTurnIntentThreshold() const { return CornerTurnIntentThreshold; }
+
+	// True when a corner turn toward this side can start now: the probe found an available corner and a clip is assigned.
+	bool CanBeginCornerTurn(bool bRight) const;
+
+	// Commits a corner turn toward this side from the current probe result: picks the clip, finds its rest/commit times,
+	// caches the per-strike warp (start -> Mid -> End), and latches the hang state. Called by URogueCornerTurnTransition.
+	bool BeginCornerTurn(bool bRight);
+
+	// One tick of the turn: advances the playhead from the stick (StickY, raw) or settles it toward the nearest rest, and
+	// returns the capsule pose for the new playhead. Called once per tick by URogueCornerTurnMode.
+	ERogueCornerTurnStep AdvanceCornerTurn(float StickY, float DeltaSeconds, FTransform& OutCapsuleTarget);
+
+	// Ends the turn and seeds the climb plane to the face we finished on, so Climbing resumes on it without the normal
+	// smoothing swinging over from the old face (and the grid stacks on the right plane from its first frame).
+	void FinishCornerTurn(bool bOntoNewFace);
+
 protected:
 
 	UFUNCTION()
@@ -281,6 +433,27 @@ protected:
 	// the two warp transforms (lip, hang) + the face normal and sets bMantleDownAvailable. Full validation each tick
 	// (behind the cheap gate) so a button press only fires when it's guaranteed to succeed (Zelda-style affordance).
 	void RefreshMantleDownProbe();
+
+	// Corner probes (run each pre-sim tick while climbing): probes BOTH sides every tick (stick-independent, so availability
+	// can drive a prompt/anim and the debug draw shows both). Populates LeftCorner/RightCorner.
+	void RefreshCornerProbes();
+
+	// One side (Side = +1 right / -1 left along WallRight), at the grid's hand-row height: an INNER side ray (a
+	// near-perpendicular wall beside you), else an OUTER edge test (the face ends within reach) + wrap ray (from past the
+	// edge and behind the face, back toward the body - finds the side face). Then the corner line = plane intersection,
+	// Mid/End transforms in the corner frame, and fit + new-face hand-purchase validation.
+	FClimbCornerProbeResult ProbeCorner(float Side) const;
+
+	// The corner clip assigned for this corner type + side (null if none).
+	UAnimSequence* GetCornerTurnAnimationFor(ERogueClimbCornerType Type, bool bRight) const;
+
+	// Capsule pose of strike [0|1] at clip time Time: the clip's own root path from the strike start, skewed so the
+	// strike ends exactly on its target. A pure function of Time (no accumulated state), so scrubbing, pausing,
+	// reversing and settling all land on the same path.
+	FTransform EvaluateCornerTurnStrike(int32 Strike, double Time) const;
+
+	// Where the UNWARPED clip puts the capsule at Time, starting strike [0|1] from its start pose.
+	FTransform ComputeCornerClipCapsule(int32 Strike, double Time) const;
 
 	bool IsSurfaceClimbable(float SteepnessDotProduct) const;
 
@@ -650,6 +823,109 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|MantleDown")
 	FGameplayTag MantleDownTiltBlendEventTag;
 
+	// --- Corner turns (probe) ---
+	// The probe runs on both sides each tick while climbing. Inner = side ray hits a wall beside you; outer = the face ends
+	// within reach and a wrap ray finds the side face around the edge. Both resolve to the same corner frame.
+
+	// (No height knob: the probe runs at the coverage grid's TOP (hand) row - ClimbGridTopOffset + the climb up-bias - the
+	// same single authority as the climb itself. A valid climb only needs the hand row, so the turn does too; lower probes
+	// would wrongly reject a corner while hanging, where the faces only exist up at the hands.)
+
+	// INNER arming: the side wall must be within (capsule radius + this) of the capsule centre.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerInnerArmDistance = 20.0f;
+
+	// OUTER arming: the face must END within this lateral distance of the capsule centre (the edge-test ray sits here).
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerOuterArmDistance = 30.0f;
+
+	// OUTER wrap ray origin: this far past the edge-test point (laterally) ...
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerOuterWrapOut = 30.0f;
+
+	// ... and this far BEHIND the current face's plane, so the ray fired back toward the body strikes the side face.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "1.0"))
+	float CornerOuterWrapDepth = 25.0f;
+
+	// Accepted turn angle (between the two face normals). Below the min, the sustained climb's normal smoothing follows the
+	// bend procedurally; the clips are authored for ~90 and the warp absorbs the rest of this window.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "degrees", ClampMin = "0.0", ClampMax = "180.0"))
+	float CornerMinTurnDegrees = 60.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "degrees", ClampMin = "0.0", ClampMax = "180.0"))
+	float CornerMaxTurnDegrees = 120.0f;
+
+	// Gap from a face to the capsule centre in the Mid/End poses. 0 = auto (capsule radius, body just touching) - the same
+	// rule as the climb mode's ClimbWallStandoff, so the End pose matches what Climbing will hold.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerWallStandoff = 0.0f;
+
+	// How far along the NEW face, away from the corner line, the End pose sits (capsule centre). Tune per type until the
+	// clip's own root travel lands close to it (the warp should correct, not create, the motion). Inner must exceed the
+	// capsule radius or the End capsule overlaps the old face.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerInnerEndOffset = 50.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerOuterEndOffset = 50.0f;
+
+	// Shrink applied to the Mid/End fit capsules so a pose resting exactly one radius off a face doesn't overlap it.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|Corner", meta = (ForceUnits = "cm", ClampMin = "0.0"))
+	float CornerFitSkin = 3.0f;
+
+	// --- Corner turns (the input-driven traversal) ---
+	// The stick drives the clip's playhead; the capsule follows the clip's root path warped onto the probe's Mid/End.
+	// Clip requirements: a ROOT-MOTION sequence (verify the retargeter's dotted root line AND that the root yaws ~90deg),
+	// "Force Root Lock" ON (the AnimBP plays it in a Sequence Evaluator, where only that flag keeps the mesh on the capsule),
+	// and a named notify (CornerTurnRestNotifyName) on the 4-limb corner rest frame.
+
+	// Clip per corner type x side. "Left/Right" = the side the corner is on, i.e. the stick direction that enters it.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	TObjectPtr<UAnimSequence> CornerInnerLeftAnimation;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	TObjectPtr<UAnimSequence> CornerInnerRightAnimation;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	TObjectPtr<UAnimSequence> CornerOuterLeftAnimation;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	TObjectPtr<UAnimSequence> CornerOuterRightAnimation;
+
+	// Name of the notify marking the corner rest frame (between the two strikes) on each corner clip. Its time is the
+	// hold pose AND the boundary between the two warps (strike 1 ends on the probe's Mid). Missing -> mid-clip + warning.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	FName CornerTurnRestNotifyName = FName("CornerRest");
+
+	// Sideways stick (raw Y) needed to commit a turn; it must also dominate the up/down axis.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CornerTurnIntentThreshold = 0.5f;
+
+	// Below this sideways push the stick counts as released and the playhead settles.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CornerTurnInputDeadzone = 0.15f;
+
+	// Playhead rate at full push (1 = the clip's authored speed). Partial push scales it, like the climb playrate.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0"))
+	float CornerTurnPlayRate = 1.0f;
+
+	// Playhead rate while settling to a rest after release.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0"))
+	float CornerTurnSettlePlayRate = 1.0f;
+
+	// Per strike, the fraction of the strike after which a release settles FORWARD (finishes the strike); before it, the
+	// playhead settles back to the strike's start. Put it just after the hand grabs. 0 = always finish once started.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CornerTurnStrike1CommitFraction = 0.4f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CornerTurnStrike2CommitFraction = 0.4f;
+
+	// Pushing the stick the other way scrubs the clip backward (back toward the start / the corner rest). Off = an
+	// opposite push just counts as a release (settle), for clips that look wrong reversed.
+	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|CornerTurn")
+	bool bCornerTurnAllowReverse = true;
+
 	TArray<FHitResult> CurrentWallHits;
 	
 	FCollisionQueryParams ClimbQueryParams;
@@ -701,6 +977,15 @@ protected:
 	// Set by OnMantleDownTiltBlendEvent when the montage fires the tilt-blend event; reset per drop in BeginMantleDown.
 	// Gates the mantle-down mode's ease-into-wall-lean (see ShouldMantleDownBlendTilt).
 	bool bMantleDownTiltBlendRequested = false;
+
+	// --- Cached corner-probe state (refreshed each pre-sim tick while climbing) ---
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner", meta = (AllowPrivateAccess = "true"))
+	FClimbCornerProbeResult LeftCorner;
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|Corner", meta = (AllowPrivateAccess = "true"))
+	FClimbCornerProbeResult RightCorner;
+
+	// The in-progress corner turn (meaningful while IsCornerTurning()).
+	FRogueCornerTurnState CornerTurn;
 
 	// Owner's warping component (found in BeginPlay); drives the mantle's motion-warp alignment to the ledge.
 	UPROPERTY(Transient)

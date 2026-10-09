@@ -326,10 +326,11 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 
 	CharacterInputs.ControlRotation = GetControlRotation();
 
-	if (MoverComp->IsClimbing())
+	if (MoverComp->IsClimbing() || MoverComp->IsCornerTurning())
 	{
 		// While climbing, hand the mode RAW stick intent (X = up/down the wall, Y = left/right along it). The climb
 		// mode maps these onto the wall plane; orientation is driven by the mode (facing the wall), not by input.
+		// The corner turn reads the same raw Y to drive its clip playhead (so the stick keeps working through the turn).
 		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, CachedMoveInputIntent);
 		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}

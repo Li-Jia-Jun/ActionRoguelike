@@ -3,6 +3,7 @@
 #include "RogueMantleDownMode.h"
 
 #include "RogueCharacterMoverComponent.h"
+#include "RogueSharedGameplayTags.h"
 #include "MoverComponent.h"
 #include "MoverDataModelTypes.h"
 #include "DefaultMovementSet/Settings/CommonLegacyMovementSettings.h"
@@ -19,6 +20,9 @@ URogueMantleDownMode::URogueMantleDownMode(const FObjectInitializer& ObjectIniti
 {
 	// Reuse the common legacy settings for verticality / mode-name lookups (the motion itself is root-motion).
 	SharedSettingsClasses.Add(UCommonLegacyMovementSettings::StaticClass());
+
+	// Mode tag (child of Mover.Climb - see URogueCharacterMoverComponent::IsInClimbState / IsMantlingDown).
+	GameplayTags.AddTag(RogueSharedGameplayTags::Mover_Climb_MantleDown);
 }
 
 void URogueMantleDownMode::GenerateMove_Implementation(const FMoverTickStartData& StartState, const FMoverTimeStep& TimeStep, FProposedMove& OutProposedMove) const
