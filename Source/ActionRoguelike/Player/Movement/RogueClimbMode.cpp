@@ -101,10 +101,16 @@ void URogueClimbMode::GenerateMove_Implementation(const FMoverTickStartData& Sta
 
 	OutProposedMove = UAirMovementUtils::ComputeControlledFreeMove(MoveParams);
 
-	// Step B - surge: scale the along-wall velocity by the animation's cadence curve so the body moves with the
-	// anim (slow during a reach, fast during a pull). Handles the clip's two-pulse profile automatically. No-op
-	// (scale == 1) until the ClimbCadence curve is authored.
-	OutProposedMove.LinearVelocity *= MoverComp->GetClimbCadenceScale();
+	// Along-wall SPEED comes from the anim: the body advances by the ClimbDistance curve's per-tick change (its slope IS the
+	// surge; the input magnitude is already in the anim playrate, so there's no reference speed), keeping the solver's
+	// DIRECTION. ClimbMaxSpeed only caps a spiking blended curve. Invalid when the push is idle (or a clip lacks the curve):
+	// the solver's own velocity then stands - with no input it decelerates the body to a stop; a curveless clip moving under
+	// input runs at plain solver speed (push x ClimbMaxSpeed), a visible tell that the curve is missing.
+	float DistanceSpeed = 0.0f;
+	if (MoverComp->GetClimbAlongWallSpeed(DistanceSpeed))
+	{
+		OutProposedMove.LinearVelocity = OutProposedMove.LinearVelocity.GetSafeNormal() * FMath::Min(DistanceSpeed, ClimbMaxSpeed);
+	}
 
 	// Keep wall contact by REGULATING the standoff, not bulldozing. Pull toward the wall when farther than the target
 	// standoff and ease to a stop as we arrive (and nudge back out if we've sunk past it). A constant press had nothing

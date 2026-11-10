@@ -331,7 +331,9 @@ void ASPlayerCharacter::ProduceInput_Implementation(int32 SimTimeMs, FMoverInput
 		// While climbing, hand the mode RAW stick intent (X = up/down the wall, Y = left/right along it). The climb
 		// mode maps these onto the wall plane; orientation is driven by the mode (facing the wall), not by input.
 		// The corner turn reads the same raw Y to drive its clip playhead (so the stick keeps working through the turn).
-		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, CachedMoveInputIntent);
+		// The mover may keep feeding the last stride after a release to finish a committed strike (ResolveClimbMoveInput)
+		// - an anim-driven exception to "only translate input here", safe because the Standalone backend never rolls back.
+		CharacterInputs.SetMoveInput(EMoveInputType::DirectionalIntent, MoverComp->ResolveClimbMoveInput(CachedMoveInputIntent));
 		CharacterInputs.OrientationIntent = FVector::ZeroVector;
 	}
 	else if (MoverComp->IsMantling() || MoverComp->IsMantlingDown())

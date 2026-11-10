@@ -38,6 +38,10 @@ protected:
 
 	// --- Climb tuning ---
 
+	// Safety CAP on the along-wall speed. The climb speed itself comes from the anim (the ClimbDistance curve advanced by the
+	// playrate - the body follows the anim), so this only catches a spiking blended curve. Keep it above (peak pull speed x max
+	// playrate), or it clips real pulls and the planted limbs skate. Also the solver's max speed (only its direction is used
+	// while the curve drives) and the plain speed of any clip missing ClimbDistance.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climb", meta = (ForceUnits = "cm/s"))
 	float ClimbMaxSpeed = 150.0f;
 

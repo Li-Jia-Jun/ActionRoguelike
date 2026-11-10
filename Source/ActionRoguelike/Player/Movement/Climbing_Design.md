@@ -65,10 +65,162 @@ Pack has only **idle (dead-hang) + 2 horizontal (L/R)** hang-move clips — no v
 - **Release hysteresis (Schmitt trigger) — done.** First pass at the edge flicker: a foot that was already **planted** searches wider (radius + reach both grow by `FootProbeReleaseHysteresis`), so it takes a clearly-gone foothold to flip to hanging — harder to release than to acquire. `RefreshFootProbes` carries each foot's previous `bHanging` into `ProbeFoot` for this. Damps *noise*, but see next.
 - **The flicker is a FEEDBACK LOOP, not noise (key insight).** The probe rides the **animated foot**, whose pose depends on the plant/hang decision it's driving: the climb pose puts the foot further out (over the void) than the hang/tuck pose, so plant→foot-out→miss→hang→foot-in→hit→plant… a limit cycle. Hysteresis on the probe *extent* can't fix it because the *measured position itself* crosses the boundary each flip. Two real fixes: (a) decouple the probe origin from the pose (decide from a body/capsule anchor, snap only the IK target to the hit), or (b) break the cycle's return edge.
 - **Idle latch — done (chosen fix).** The cycle is only *visible* at idle (motion masks it), and a foot dangling near a surface reads far better than one pawing the air. So while the player isn't driving movement (`GetClimbMoveSpeedFraction() ≤ FootPlantIdleInputDeadzone`), a **hanging foot is not allowed to re-plant** (`RefreshFootProbes` forces it back to `bHanging`). That removes the hang→plant edge, making hang an *absorbing* state at idle → it converges to the stationary dangle instead of cycling. Applied to the **status** (bool), not the AnimBP blend alpha, so state and presentation don't diverge and the upcoming foot-lock/IK reads a stable decision. Moving re-enables normal re-planting (where the loop is hidden). Fuller fix if it ever shows *during* motion: the capsule-anchor decouple, or foot-lock (release on hip-to-target distance) with the plant IK.
-- **Remaining (Control Rig):** consume `TargetLocation`/`TargetNormal` → two-bone IK plant, searching a small region and snapping to the nearest valid spot (e.g. a notch edge); IK weight + position `FInterpTo`'d with hysteresis to avoid popping. Hands get the same treatment later.
-- **Hand grips — done (C++, detection):** `ProbeHandGrip`/`RefreshHandGrips` expose `LeftHandGrip`/`RightHandGrip` (`bFound` + world `Location`/`Normal`). Unlike the foot probe, the sweep is **body-anchored** (capsule + `HandGripStanceHalfWidth`/`HandGripAnchorHeight`, projected to the plane), *not* the live hand bone — so the grip is a **stable world pin** and can't enter the pose-feedback loop (the hands are about to be IK-pinned, so probing from them would be circular). Tune the offsets so the grips sit where the braced idle hands already grab (seamless pin). Debug-draws magenta (found) / silver (none).
-- **Dead-hang anchoring (FBIK) — AnimBP/CR side.** The idle dead-hang extends the arms (hands go overhead in the clip), which would lift them off the wall; the fix is **FBIK pinning both hand effectors to `LeftHandGrip`/`RightHandGrip` with pelvis translation enabled**, run after the pose blend each frame, weight ramped by the dead-hang alpha. The solver drops the **body** to keep the hands anchored as the arms extend (hand IK *alone* would just re-bend the arms — the body must be in the solve). Arms stiff / spine+pelvis free so it drops the body not the arms; feet left unpinned (they dangle, ride the drop). Moves the mesh pelvis, not the capsule (visual drop + mesh/capsule offset — watch camera). This is the hand-side of the sticky-world-target / foot-lock idea.
-  - **Gotcha — gate the pin on `bFound`, and never publish a default target.** Bug: entering the corner turn (a separate mode → `IsClimbing()` false) reset both grips to a default struct, i.e. `Location = (0,0,0)`, while the pin weight was still interping down → FBIK (pelvis translation on) dragged hands + body toward **world origin**, then "blended back". Fix, two halves: (C++) outside Climbing only `bFound` drops — `Location`/`Normal` keep the last grip (frozen); a miss while climbing defaults to the anchor projected onto the wall. (AnimBP) per-hand pin weight = hang alpha × `FInterpTo(bFound)`, so the pins blend **out** during the corner turn / mantles (the clip moves the hands) and back in on hand-off. Same rule for the future foot-plant IK: weight on a flag, never a zero-vector target.
+- **Actuators + hand grips — superseded by the stance pins below.** The body-anchored hand grips (`RefreshHandGrips` / `LeftHandGrip` / `RightHandGrip`, with `HandGripStanceHalfWidth`/`HandGripAnchorHeight`) are **retired**: a hand now aims at its baked landing on the destination clip (predictive placement), and the idle FBIK anchoring is just the hand pins on the idle clip's grips. The old gotcha — *never publish a zero-vector target; put the pin weight on a flag, not the target* — is baked into `FClimbLimbPin` (it freezes its last `Location` when unpinned, so a blend-out never targets world origin). See **Limb IK — stance pins**.
+
+## Limb IK — stance pins (Control Rig)
+
+Per-limb world-locked contact pins the Control Rig plants hands/feet onto. **C++ owns *where* and *how much*; the CR applies it.** One `FClimbLimbPin` per limb (`LeftFootPin`/`RightFootPin`/`LeftHandPin`/`RightHandPin`), refreshed each pre-sim tick by `RefreshLimbPins`. Two resolvers: **predictive** for the sustained climb (`ResolveLimbPinPredictive`), **reactive** for corner turns (`ResolveLimbPin` — the corner clips carry no baked contacts).
+
+- **What the CR reads.** `Weight` (0..1 — the single on/off, `>0` = pinned) drives the effector's position (+rotation) alpha; `LocalLocation`/`LocalNormal` are the target in **mesh-component space** (feed these — a world position flings the rig). `Location`/`Normal` are the raw world pin (debug + the break test).
+- **Stance vs swing.** An authored per-clip float curve per limb (`Stance_FootL/R`, `Stance_HandL/R`) = *holding* (IK on) vs *swinging* (free, follows the clip). It is also the IK blend profile. A limb with no curve stays dormant — opt-in, one limb at a time.
+- **Contact point = probe point = IK point.** Aim the baked contact bone, the socket knobs and the CR effector tip at the real contact (a palm, `ball_l`), not the wrist/ankle, so `LimbPinSurfaceOffset` — the "lip" standoff pushed out along the normal — reads the same on every limb. Applied **once at consume** (into `LocalLocation`, from the raw on-surface pin), so it can't accumulate on a held pin.
+- **Target spring.** The world target is eased by a critically-damped spring (`bUseLimbIKSpring`, `LimbIKSpringStiffness`) — zero lag on a held pin (its target doesn't move), absorbs target *jumps*. Past `LimbIKSpringSnapDistance` it snaps instead (a stale/far target) — except an idle-retreat move, which always eases.
+
+### Sustained climb — predictive placement
+- **Bake (offline).** `URogueClimbContactBaker` (editor Animation Modifier) auto-detects each plant at the stance curve's rising crossing of `PlantDetectThreshold` — two per limb on the two-strike clips; a hold that wraps the loop seam is handled circularly — and stores the contact bone's **component-space** landing in `URogueClimbContactMetaData`. It also stamps a monotonic `ClimbPhase` 0→1 curve, so the runtime can locate itself in the clip (a stance value repeats; a phase value doesn't).
+- **Destination clip.** Moving = the dominant blendspace sample (`GetDominantClimbClip` queries `ClimbBlendSpace` with the input the component itself drives — note the axis swap: BS input = `(Intent.Y, Intent.X)`). Idle = `ClimbIdleClip`, baked like the move clips (flat stance → one landing per limb = the authored idle grips).
+- **Per limb, per tick.** Phase from the live `ClimbPhase` curve → `W` = the **destination clip's own** stance curve at that phase (never the blended pose — crossfades smear it) → plant = nearest in phase, circularly (`FindNearestPlant`). While unlocked, the target = `MeshXform · Landing` traced onto the wall (`ResolvePlantTarget`), re-resolved every frame so the body's travel is folded in — no fall-short. `W ≥ PredictiveLockStanceValue` → world-lock; the **reach leash** then keeps the held pin within each limb's own reach, dragging it along the wall only if the body would leave it behind (see *Stopping well*, layer 5). Weight = `W`, smoothed (`PredictiveWeightInterpSpeed`) so a playhead jump eases in instead of snapping. A trace miss (over a void) aims at the predicted anchor itself.
+- **Release / stop handling** — what happens when the player lets go (the staged retreat, the re-grip swing + peel, the weight shift, the reach leash + reach cap, the bad-segment skip) and the direction-change blend now live in their own section: **Stopping well — the idle retreat** below.
+- **"The transition-to decides."** Code state picks the regime (moving / idle / corner — discrete, doesn't crossfade); the destination clip's own curve supplies the clean signal; inertialization smooths the pose. Applies to every future state boundary.
+
+### Corner turn — reactive pins
+- Each limb probes **both faces** from its live bone and pins to the nearest valid hit, so it auto-selects the face it's on as the turn carries it across. The corner clip's stance curves gate pin/release (`LimbStanceThreshold`). Acquire at the hit, then **hold rigidly — never re-probe a held pin** (one-way ratchet: re-probing reads the limb the IK already moved, and the pin creeps). The reach leash drags a held pin along its face to keep it within reach; one it can't keep there holds (the reach cap bends it) until the corner clip's stance ends. Weight = the stance curve.
+- **Void fallbacks.** Arm over a void → edge-search along the segment from the intended (void) grip back to the last grip (two samples, nearest-to-void wins) → that hit, else grace-hold the last grip, else play the clip. Leg → stays unpinned (the foot probe's `bHanging`, debounced by `FootHangCooldownSeconds`, drives the hang/tuck).
+
+- **Why it stays drift-free** — four rules, each closing a feedback/accumulation path: (1) never re-probe a held pin; (2) break off a body point, not the IK'd limb; (3) apply the surface offset once at consume, from the raw pin; (4) predictive targets come from the **baked anchor** resolved against the mesh root — feedback-free — never from the live, IK'd limb.
+
+*History:* the sustained climb first ran **reactive** pins too — acquire at the live limb on the stance edge, an idle state-hold with a settle window (`IdlePinSettleDelay`), an intent fade near release (`LimbPinRelaxBand`), roll-back release + re-acquire with a reuse tolerance (`LimbPinReuseDistance`), an enter-climb grace, and a load-bearing-hand exemption. Predictive placement replaced all of it (removed 2026-11-01); the reactive resolver survives only for corner turns.
+
+## Stopping well — the idle retreat (showcase)
+
+> **The problem.** The climb runs on in-place clips: the body follows each clip's `ClimbDistance` curve, and predictive IK world-pins every hand and foot on the holds the clip is reaching for. When the player lets go, the animation blends to the idle cling - but the limbs are still pinned on the last strike's holds, which rarely match the idle grips, and in the middle of a reach the torso is ahead of the root (`ClimbDistance` only credits travel during the pull). Left alone, a stop produces a run of bad poses: a relaxed torso with limbs stretched to far holds, limbs sliding or snapping back all at once ("floating"), arms locked straight, and pops whenever the targets swap.
+>
+> **The goal.** Make every stop read like a climber settling into a rest - re-grip deliberately, one support at a time, with the body answering each move - **without** auto-completing moves the player didn't ask for, **without** a full-body solver (the rig is four two-bone IKs), and **without** anything that can drift.
+
+*[Capture: the same mid-strike stop with every layer off, then on.]*
+
+### The layers, in the order they act
+
+| # | Layer | Answers | Where |
+|---|---|---|---|
+| 1 | Bad-segment skip | "Don't stop *here*." | strike markers + `ResolveClimbMoveInput` |
+| 2 | Staged, sequenced retreat | "Which limb moves, and when?" | `BuildIdleRetreatPlan` / `AdvanceIdleRetreat` |
+| 3 | Re-grip swing + effector peel | "How does a limb move from one grip to another?" | `EvaluateRegripSwing` |
+| 4 | Weight shift (pelvis, hip-in, chest) | "How does the body answer?" | `RefreshClimbWeightShift` → Control Rig |
+| 5 | Reach leash + reach cap | "What if the body would leave a limb out of reach?" | `LeashLimbTargetsWithinReach`, `CapToLimbReach` |
+| 6 | Clip-switch blend + re-grip | "And when the player changes direction instead?" | `RefreshLimbPins` + the predictive resolver |
+
+**Two questions, kept apart.** Every pinned limb answers two separate questions. *Where should it be?* - decided by **events** (a clip switch, committing to idle). *Can it reach where it is?* - a condition that can go wrong at any moment (the body keeps travelling, the blend differs from the dominant clip, the idle clip pulls the torso back). Mixing them produced a growing pile of special cases (an over-extension release while moving, a slide at idle, a body-travel break distance); separated, the whole policy is four lines:
+
+| When | What the limb does |
+|---|---|
+| Clip switch, and the new clip has the limb in stance more than `LimbRegripMinDistance` away | **Arcs** to the new plant - all limbs at once (layer 6) |
+| Idle committed | **Schedule**: arcs to the idle grips, one support at a time (layers 2-4) |
+| Otherwise (same clip, idle→move, corner turn) | **Holds**; the clip decides when it swings and releases |
+| Always, on top of the above | **Reach leash**: a pinned or fading target never sits past the limit - it's dragged along the wall by just the excess (layer 5) |
+
+All of it is presentation on top of the existing pins: the capsule, the Mover sim and the pin placement rules are untouched (one exception - the skip holds the input for a moment), so the drift-free rules of *Limb IK — stance pins* still hold.
+
+### 1. Bad-segment skip — don't stop in a stretch that can't look good
+**What you see:** releasing in the few frames where a stop always looks wrong (mid-reach) plays on to the end of that short stretch, then stops as usual. Releasing anywhere else stops at once.
+
+- **Bad-segment skip (strike markers) — a stop can't land in a stretch that looks bad.** A clip may carry short `StrikeCommit` → `StrikeEnd` marker pairs (sync markers or notifies; names `ClimbStrikeCommitMarkerName` / `ClimbStrikeEndMarkerName`) around only the stretches where stopping produces a bad pose - e.g. the reach, where the in-place torso leads the root and a stop strands the just-planted limbs far from it. A release inside a segment keeps feeding the last input (`ResolveClimbMoveInput`, called from the player's `ProduceInput`) until the clip crosses the segment's end marker, then stops as usual (blend to idle + retreat). It's a **skip, not an auto-complete**: the end pose is wherever the segment ends, not necessarily a full strike, and segments are kept as short as possible so the forwarding isn't felt. Untagged clips, and everything outside a segment, stop on release as normal.
+  - **Decision:** one query on the dominant clip at the live `ClimbPhase` - is the most recent strike marker before the playhead (circular, so a segment may wrap the loop seam) a `StrikeCommit`? It both starts the skip (on release) and ends it (crossing `StrikeEnd` flips the answer). Holding new input in any direction passes straight through and cancels it.
+  - **Authoring:** alternate Commit, End (two Commits in a row run on to the next End). A clip with commits but no `StrikeEnd` anywhere never skips - it would otherwise latch the input forever - and logs a warning.
+  - **Wiring:** `bCommitClimbStrikes` toggles it; `IsClimbStrikeCommitting()` is true while skipping. The AnimBP's climb move→idle rule must use `GetClimbMoveSpeedFraction()` (it sees the held input), not raw keys or velocity. Debug: `[ClimbStrike]` logs each release's decision ("finishing the strike" / "before the commit marker, going idle" / "no strike markers, going idle") and the segment end ("reached the strike end").
+  - *History:* built first as **strike commit — finish the pull** (a commit marker per strike, so a release past it finished the whole strike into a four-point hold near idle). Dropped as unwanted auto-completion, then repurposed as these short skip segments once a mid-reach stop proved to be the case that breaks the retreat. Identifiers keep the original "strike / commit" names so tuned values and authored markers survive.
+
+### 2. Hold, then sequence — one support at a time
+**What you see:** nothing lets go the instant the player stops (so a quick resume is seamless); then the limbs re-grip toward the idle pose one diagonal at a time, the worst-placed first, and the body never hangs on fewer than two diagonal holds. Contralateral pairs (hand + opposite foot) are the point: a diagonal support resists the "barn door" swing that a same-side pair would let the body make.
+
+- **Idle — staged, sequenced retreat.** On move→idle nothing releases: gripping limbs **hold** their move grips (a quick resume is seamless), and a limb caught mid-swing — already unpinned — approaches its idle grip at once. After `IdleRetreatDelaySeconds` of committed idle the sequencer (`BuildIdleRetreatPlan` / `AdvanceIdleRetreat`) retreats the still-gripping limbs: those displaced more than `LimbRegripMinDistance` → a **contralateral pair** (LH+RF / RH+LF) when both of a diagonal must move, else singles → most-displaced step first (a pair counts its sum) → each step waits for its limbs to arrive (spring within `RegripArrivalTolerance`). Never both hands or both feet at once, so a planted diagonal always remains. In a pair the hand leads (`bIdleRetreatPairHandLeads`) and the follower trails by `IdleRetreatPairStagger`.
+
+**Schedule at rest, respond while moving.** The sequencer runs **only for the retreat to idle**. At rest the character is stable, the viewer studies the pose, and the player has handed over control, so floating is most visible and scheduling costs nothing - and it's the system's job to avoid it. Out-of-reach limbs never break it: the leash drags them along the wall while they stay pinned, and the plan waits until the dragging stops (layer 5). While moving the input is the authority: every policy change (a clip switch, a re-grip) applies **at once** to all limbs it concerns, because lag between stick and body reads as unresponsive, motion masks a brief float, and a float caused by a fast input change is the player's choice.
+
+### 3. The step — lift, travel, place, with a peel
+**What you see:** a limb peels off its hold - the edge nearest the body first, fingertips/toes last - lifts, crosses and comes straight down onto the new grip, instead of sliding along the wall. Short re-grips are quick little hops; long ones are slower, higher arcs.
+
+- **Re-grip swing — lift, travel, place.** A re-gripping limb doesn't slide along the wall: it travels a **cubic Bézier** (`EvaluateRegripSwing`) — `P0` = where it was released, `P1 = P0 + N·h`, `P2 = target + N·h`, `P3` = the target — so it peels straight off its grip, crosses, and comes straight down onto the new grip (the procedural step of spider/creature rigs). Duration = distance ÷ `RegripSwingSpeed` (≥ `RegripSwingMinDuration`); peak lift = distance × `RegripSwingLiftRatio` (≤ `RegripSwingMaxLift`; handles scaled by 4/3 since a cubic's midpoint reaches ¾ of its handle height). Timing = smoothstep, or the optional `RegripSwingProfile` curve. During a swing the arc **replaces** the target spring (which would lag and flatten it); the spring is parked on the arc so it takes over at rest when the swing lands, and landing is the sequencer's arrival. `bRegripArc` off = the old spring slide.
+  - **Effector peel.** During the swing the published normal (what the CR orients the hand/foot from) leans toward the in-plane "away from the body" direction by `RegripHandPeelAngle` / `RegripFootPeelAngle` × `4UV` — the arc's lift normalised to 1 at its peak — so it's flush on both grips and most tilted at the top. With the palm/sole laid across the normal, the edge nearest the body comes off first and the far edge (fingertips/toes) leaves last and lands first. The direction is fixed per swing from the body, not the travel, so a limb peels the same way whichever way it moves. C++ only; negative angle flips it.
+
+**One motion for every re-grip.** The arc isn't only the idle retreat: every time a LOCKED limb moves to a new hold it travels this same swing - the idle sequencer, the clip-switch re-grip (layer 6) and the leash's last resort (a limb it can't keep on its face, layer 5). All go through `BeginRegripSwing`: unpin, re-lock in the same tick, and the arc starts from the point the rig was last shown. That's why it's the *re-grip* swing (settings `Mover|Climbing|LimbIK|RegripSwing`) - it started life as the idle retreat's swing and kept that name until it served every re-grip.
+
+*[Capture: a close-up of one hand's retreat, arc off vs on, peel 0 vs default.]*
+
+### 4. The body answers — weight shift
+**What you see:** just before a limb lifts, the hips move onto the holds that stay (and press into the wall when a hand lets go); the chest tilts toward the supporting hand and leans back so the arms stay straight; when the limb lands the body settles back. A diagonal pair barely moves the body - the support diagonal already runs through it.
+
+- **Weight shift — the body moves onto the remaining holds.** The CR is per-limb two-bone IK (no full-body solver), so without this nothing moves the body when a limb lets go. A limb is **unloaded** (`IsLimbUnloaded`) from its sequencer step's start until it lands — *pinned ≠ loaded*: during the lead-in it's still held, but the body has stopped leaning on it. `RefreshClimbWeightShift` (end of `RefreshLimbPins`):
+  - **Shift** = (centroid of the loaded grips − centroid of all four) × `WeightShiftLateralGain` sideways / `WeightShiftVerticalGain` up-down, in the wall frame (WallUp = gravity flattened onto the wall), capped at `WeightShiftMaxDistance` (two-bone IK can't stretch). A released limb counts from where it left (its pin is already re-locked at the idle grip). Single limb → toward the other three; a diagonal pair → ≈ 0 (the support diagonal runs through the centre — the anti-"barn door" reason for contralateral pairs). All four loaded → exactly 0, recomputed every tick, so nothing accumulates.
+  - **Hip-in** while a hand is unloaded: `−N · WeightShiftHipInDepth`, faded to 0 as the wall leans back into a slab (`WeightShiftHipInSlabFadeAngle`; climbers stand off a slab). Not under the along-wall cap.
+  - **Timing**: the lift waits `WeightShiftLead` after the unload, so the body visibly moves first; `0` = lift at once (shift during the swing). Smoothed with `FMath::CriticallyDampedSmoothing` (`WeightShiftSmoothingTime`), no overshoot. Speed-capped at `WeightShiftMaxSpeed` (the per-tick move and the smoother's rate): crossed limbs put the load centroid far across, and the next step can swing it to the other side, which the smoothing alone would cover in a blink.
+  - **Chest** (`ClimbChestRotation`), read back off the *smoothed* shift so it moves with the body: (a) tilt — the chest's top toward the sideways shift, `WeightShiftChestTiltPerCm`; (b) lean back by `atan(hip-in / WeightShiftShoulderHeight)` × `WeightShiftChestLeanScale`, which keeps the shoulders where they were so the planted arms are unaffected. Twist deliberately left out.
+  - **Published** in mesh space: `ClimbBodyShift` (add to `pelvis`, global) and `ClimbChestRotation` (split across the spine chain, global), both applied in the CR **before** the limb IK so the world-locked limbs bend to absorb it. Presentation only — the pins resolve from the mesh root, not the pelvis, so the drift-free rules hold. Idle retreat only (move clips author their own weight shift). Settings are `EditAnywhere` for live PIE tuning.
+
+*[Capture: a single-hand retreat, `bIdleWeightShift` off vs on, debug draw showing the centroids.]*
+
+### 5. Never out of reach — the reach leash and the reach cap
+**What you see:** when the body moves away from a limb that's holding on - a stop as the idle clip pulls the torso back, a direction change, the blend leaning another way - the hand or foot is dragged along the wall just enough to stay within reach, instead of locking straight or letting go; a limb fading out after a clip switch is dragged the same way, so it fades with the body. Anything else that's briefly out of reach bends softly toward its target.
+
+- **Reach leash — a limit, not a move.** `LeashLimbTargetsWithinReach`, every climbing tick (moving, idle and the corner turn), before the idle block and the resolvers. For each **held** target - pinned, or fading out on its frozen grip after a clip switch (row "IK on → IK off" in layer 6); not one approaching a plant (re-resolved from the live body every tick) or on a re-grip arc - it measures root → IK target (the pin pushed out by `LimbPinSurfaceOffset`; root = `Left/RightHandRootBoneName` = upperarm, `Left/RightFootRootBoneName` = thigh, last evaluated pose, so the weight shift counts) against `LimbReachLeashRatio` × the limb's straight reach (reference-pose chain length root → contact tip - hands: `Left/RightHandSocketName`, the palm sockets; feet: `Left/RightFootReachTipName` = ball - × mesh scale, cached per mesh asset). One ratio for every limb, but each limb's own length - hands and feet stop at their own stretch.
+  - **The drag.** The reachable part of the target's plane is a disc: centred on the root's projection, radius √(L² − h²), h = the root's distance from the plane. Past the limit the target moves to the disc's nearest point - along the face, the shortest way back into reach, by **exactly the excess** - then re-traces onto the real surface there (`ProbeContactToward`: a bumpy face is followed; past a wall's edge or into a corner there's no same-face surface, so a limb is never dragged off its face). No state, no speed, no hysteresis: the pin moves only while, and as fast as, the body pulls it - it reads as the body dragging a hand that won't let go.
+  - **The spring moves with it.** The target spring absorbs *jumps*; the leash is a continuous constraint, so the spring state is translated by the same delta. Otherwise the spring's lag (~0.2 s at stiffness 120) would trail the shown limb behind the dragged target, back out of reach.
+  - **Last resort.** A *pinned* limb it can't keep on its face within reach (the face has no reachable point left - the body turned away from it or pushed off - or that point is off the surface): the climb lets go and **re-grips** on the arc onto this tick's plant (the resolver re-locks it right after; out of any retreat plan, `DropLimbFromRetreatPlan`); the corner turn **holds** - a reactive re-acquire would land on the same unreachable face - and the reach cap bends it until the corner clip's stance ends.
+  - **At idle** this is what fixes the classic stop: the idle clip reclaims the torso while the limbs are still on their move grips, often leaving *both hands* out of reach. The leash drags both at once - neither leaves the wall, so "never both hands off" holds - and the retreat plan is built only once no pinned target was dragged that tick, so it measures from settled grips and keeps its one-support-at-a-time order. A not-yet-released limb the weight shift pulls out of reach mid-sequence is dragged, never released out of turn.
+  - `bLimbReachLeash` off = held pins stay wherever they are (the cap still bends them). Debug: a magenta line root → dragged target (plus the probe's magenta hit) while it drags; a red root → target line and `[ClimbReach] XX can't stay on its face within reach (N% of its reach) - re-grips` for the last resort.
+- **Reach cap (visual, every IK target).** The leash covers held targets; the cap is the visual net for the rest - a target approaching a plant, a clip-switch ease sliding through unreachable points, the start of a re-grip arc, a corner pin the leash couldn't keep in reach, the spring's few frames of lag. `CapToLimbReach` (in the component-space conversion, after the spring): the target handed to the rig is pulled toward the limb's root so its distance never exceeds `LimbReachLimit` x reach - untouched below `LimbReachSoftStart` x reach, then `d' = s + (M - s)(1 - e^(-(d - s)/(M - s)))` (slope 1 at the start, asymptotic to M; M <= s = hard cap). An out-of-reach target reads as "reaching toward it, still bent" and the cap fades by itself as the target returns in reach - no weight change, no hysteresis. Purely visual: pins and the spring keep the REAL target. Keep `LimbReachLeashRatio` ≤ `LimbReachSoftStart` and the cap never touches a held pin. A re-grip swing starts from the last SHOWN point (`FClimbLimbPin::DisplayedWorld`). Elbow bend vs ratio (equal segments): 2·acos(r) - 16° at 0.99, 36° at 0.95, 51° at 0.9, 74° at 0.8. Known gap: the intentionally straight dead hang gets bent (hands short of holds) - to be special-cased later. Debug: yellow line = the unreachable part (shown point -> real target).
+- Settings: `Mover|Climbing|LimbIK|Reach`.
+
+### 6. Direction changes — blend, don't pop
+**What you see:** pressing a new direction mid-strike (W then D) hands each limb over to the new clip's holds - planted limbs step across on the arc, the rest blend - instead of snapping. All at once, following the input (see *Schedule at rest, respond while moving*, layer 2).
+
+**Per-limb policy on a clip switch.** "IK on" = the clip has the limb in stance (pinned or approaching a plant); "IK off" = it has it mid-swing (the clip drives it, IK weight 0).
+
+| # | Old clip | New clip | What the code does | What you see |
+|---|---|---|---|---|
+| 1a | IK on, **locked** | IK on | **Re-grip** (`RegripLockedLimbsOnClipSwitch`): if the new clip's plant is farther than `LimbRegripMinDistance` (8 cm - shared with the idle retreat), the limb lets go and the re-grip arc carries it onto the new plant, re-locked the same tick; within the distance it keeps its hold. Once per limb per plant. | The planted limb **steps across** to where the new clip wants it (or stays put if that's nearly the same spot). |
+| 1b | IK on, **approaching** | IK on | Its target switches to the new clip's landing; `bClipSwitchEase` lets the spring ease it past the teleport guard until it arrives (within 1 cm); locks there if the new stance is high enough. | The limb **glides** from where it was heading to the new hold. |
+| 2 | IK on | IK off | Release, but inside the clip-switch blend window the weight **eases out** instead of dropping to 0, the target frozen on the old hold meanwhile - dragged by the reach leash if the body would leave it out of reach. | The limb **lets go gradually** into the new clip's swing, following the body. |
+| 3 | IK off | IK on | Approach the new clip's plant: the target jumps there unseen (weight 0), then the weight **eases in** at the window's rate; may lock at once. | The limb **blends from the new clip's pose onto its new hold**. |
+| 4 | IK off | IK off | Nothing - weight stays 0. | The limb follows the clips (the blendspace's own crossfade). |
+
+Timing: the IK switches at the raw clip change (the component reads the unsmoothed input), while the pose crossfades over the blendspace's own smoothing. The IK's blend window is **read off the blendspace asset** (`GetClimbClipSwitchBlendTime`), so the two can't drift apart: Sample Smoothing's Weight Speed if set (`1 / speed`, or `~0.87 / speed` with its ease-in/out "Smoothing" on - the engine's critically damped weight spring, ~95% there), else the axes' Input Interpolation time, else 0 (the pose pops, so does the IK). `bClipSwitchBlend` off = the old instant switch. Settings: `Mover|Climbing|LimbIK|ClipSwitch`. Debug: `[ClimbIK] blendspace clip switch: A -> B (limbs blend over N s, from the blendspace)` and `[ClimbIK] XX re-grips onto <clip>'s plant (N cm away)`.
+
+- **Blendspace clip switch — blend, don't pop.** A direction change mid-strike (W then D: Up -> Up-Right) flips the dominant clip, so every limb's destination landing changes at once. Two things used to pop it: (1) the target spring's teleport guard - cross-clip landings are easily > `LimbIKSpringSnapDistance` apart, so the target snapped; (2) release zeroed the weight in one tick - when the new clip says the limb is mid-swing, a limb held at full weight dropped straight to FK. Within ONE clip both are correct and invisible (plant-to-plant jumps happen in the swing at weight 0; an authored stance ramp is ~0 before release), so the fix keys off the switch itself: `RefreshLimbPins` compares the dominant clip with the last MOVING tick's (`LastDominantClimbClip`, cleared at idle / off the sustained climb, so idle<->move edges don't count). On a change: LOCKED limbs the new clip also plants elsewhere re-grip on the arc (case 1a in the table above), and every pin gets `bClipSwitchEase` (its target eases through the spring past the teleport guard until it catches up within 1 cm), and a window as long as the pose's crossfade opens (read off the blendspace) in which the resolver eases the weight - in and OUT (release fades instead of zeroing; the frozen Location keeps it aimed where it was) - at a rate covering ~95% in that time. `bClipSwitchBlend` off = the old instant switch. Debug: `[ClimbIK] blendspace clip switch: A -> B`.
+
+### What didn't work (and why it shaped the rest)
+- **Releasing all four limbs at once on committed idle** (the first version) - several limbs moving with nothing anchoring the body read as floating. → the sequencer (layer 2).
+- **Finishing the whole strike on release** ("strike commit") - it fixed the pose but auto-completed moves the player had abandoned. → repurposed as short skip segments (layer 1).
+- **Holding the move pose until the retreat finished** (frozen blendspace) - it froze the extended torso over a capsule that hadn't caught up; worse than blending back. Removed.
+- **Moving the capsule under the body on a stop** (idle settle: for ~0.5 s after a stop the capsule followed the animated pelvis, so the torso stayed put while the pose blended to idle) - physically motivated (the in-place torso leads the root mid-reach; the root is bookkeeping, the mass is where the torso is), but the capsule glide read oddly, and it was the one piece of the stop handling that changed the simulation. Removed; the reach leash (layer 5) handles the stretched limbs it was meant to fix, and the stop handling is presentation-only again.
+- **Releasing a limb that went out of reach** (the over-extension release: let go and re-grip on the arc, idle and moving) - at a stop both hands often went out of reach at once, and releasing both floated; while moving it added a hop just before the clip's own swing, and "once per plant" left a limb stretched when its new plant was out of reach too. Then **sliding** it back within reach at a fixed speed (idle only) - fixed the stop, but a fixed speed can't keep up with a body that keeps moving. → the reach leash (layer 5): a limit instead of a move, the same everywhere.
+- **A body-travel break distance** (`LimbPinBreakDistance`, capsule travel since the grab) - one centimetre value for hands and feet, measured from the capsule rather than the limb; hands broke far more often than feet. → the leash's per-limb reach ratio.
+- **Fading the IK to the clip's own pose while a target is out of reach** - rejected at design time: the clip's limb mid-strike belongs to another motion (it would jump elsewhere, then back), and it costs two transitions plus hysteresis. → the reach cap (layer 5), which is continuous and stateless.
+
+### Debugging and tuning
+- **One switch:** `game.climbing.DebugDraw` (on by default).
+  - cyan / green spheres - a pin approaching / locked (the LOGICAL pin);
+  - white sphere (size = IK weight) + white line to the pin - the target the rig is ACTUALLY given (after the spring, a swing and the reach cap); a green pin the limb hasn't reached yet is the weight fading in, the spring easing, a swing in flight, or the cap;
+  - orange - the retreat plan (move grip → idle grip, step numbers, 3 s), the swing's arc point and peeled normal;
+  - amber / white points - the load-bearing / all-four centroids; amber line + sphere - the body shift;
+  - magenta line - the reach leash, taut (limb root → dragged target) while it drags; red line - a held limb it couldn't keep in reach (2 s on a climb re-grip; continuous while a corner pin holds); yellow line - the part of a target the reach cap is holding back;
+  - logs: `[ClimbRetreat]` (plan), `[ClimbReach]` (a leash re-grip), `[ClimbStrike]` (every release's skip decision), `[ClimbIK]` (clip switches, re-grips).
+- **Settings:** `Mover|Climbing|LimbIK|IdleRetreat`, `…|RegripSwing`, `…|Reach`, `…|ClipSwitch`, `…|Placement` (`LimbRegripMinDistance`), `…|Smoothing`, and `Mover|Climbing|WeightShift`. Every layer has an off switch for A/B comparison, and the newer settings are `EditAnywhere` for live tuning in PIE.
+
+### Known limitations
+- A leash drag is a hand or foot sliding on the wall: invisible over a few centimetres, but a long drag would read as skating. Not expected - clip switches arc, and clips swing limbs on schedule - but it's the thing to watch.
+- The reach cap also bends poses that are straight on purpose (the dead hang) - special case pending.
+- The leash and the reach cap read last frame's pose (one frame behind - a couple of centimetres at climb speed; the cap absorbs it).
+- The weight shift runs during the idle retreat only - the move clips author their own.
+
+### Capture checklist (showcase)
+- Mid-strike stop: every layer off vs on.
+- Re-grip swing: `bRegripArc` off vs on; peel angles 0 vs default.
+- Weight shift: `bIdleWeightShift` off vs on, with the debug centroids visible.
+- Mid-reach stop with and without a skip segment (`bCommitClimbStrikes`).
+- W → D: `bClipSwitchBlend` off vs on; `bRegripOnClipSwitch` off vs on (planted limbs keep their old holds vs step across).
+- A stop that strands both hands: `bLimbReachLeash` / `bCapLimbReach` off vs on (straight arms or a double release vs both hands dragged, then the one-at-a-time retreat).
+- One pass with the debug draw on, to show the machinery.
 
 ## Procedural tuck — floating-limb fallback
 - When a foot's probe returns `bHanging` (no reachable target) → blend that foot's IK weight to 0 **and** apply a small **additive/procedural tuck** (pull the foot toward the body/wall) so it reads as dangling/reaching, not frozen over open air. IK-weight-0 alone isn't enough — the FK pose is the braced "planted on air" pose (image 4); the tuck is the half that actually kills the artifact.
@@ -80,51 +232,46 @@ Pack has only **idle (dead-hang) + 2 horizontal (L/R)** hang-move clips — no v
 
 ## Animation ↔ movement sync (foot-lock + surge)
 
-**Problem.** The climb *mode* moves the capsule at a smooth, near-constant velocity, but a climb clip's motion is a burst rhythm — *reach (body ~still) → pull (body surges) → reach…*. Constant body velocity against a bursty animation makes hands/feet slide on the wall. Fixed in two layers.
+**Problem.** A climb clip's motion is a burst rhythm — *reach (body ~still) → pull (body surges) → reach…*. Moving the capsule at a smooth, near-constant velocity against it makes gripped hands/feet slide on the wall. Fix: **the anim drives the body speed** — the body follows the clip, not the other way round.
 
-### Step A — playrate sync (matches the loop *average*)
+### Distance curve — the body follows the anim
 
-**Reasoning chain (the part to remember):** we want a gripped hand to stay world-still, or it skates → `v_world = 0`. Its world motion is the body plus the hand-relative motion the clip drives; in an in-place clip the planted hand slides past the root at `-R · V_clip`. For the two to cancel we need `R · V_clip = v_body`. `V_clip` is **fixed** (baked into the clip, can't change at runtime), but `v_body` **scales with input** → so `R` is the only free term, and it must scale with input too.
+**Reasoning chain (the part to remember):** a gripped hand stays world-still (no skate) only if the body advances exactly as far as the planted contact slides back through the in-place clip. The clip's **root-motion sibling *is* that travel** — so author it as a curve and move the body by it, and the slide cancels at *every instant*, not just on average.
 
-```
-v_world = v_body + v_relative,   v_relative = -R · V_clip     // along the climb axis
-v_world = 0            ⇒  R · V_clip = v_body                 // the anim must cancel the body
-v_body  = fraction · ClimbMaxSpeed    (scales with input)
-V_clip  = const                       (fixed by the clip)
-⇒ R = v_body / V_clip = fraction · (ClimbMaxSpeed / V_clip)
-        └ input part ┘   └──── scale ────┘
-```
-
-So `playrate = GetClimbMoveSpeedFraction() · scale`, with `scale = ClimbMaxSpeed / V_clip` (≈1 when `ClimbMaxSpeed ≈ V_clip`). `V_clip` = contacts' stride ÷ loop time (empirical).
-
-**Limit:** `R` is one scalar but `V_clip` varies within the loop (slow reach, fast pull), so this cancels only the loop *average* — a residual within-cycle slide remains → Step B.
-
-### Step B — velocity surge (matches the *instant*)
-
-Vary body speed with the cycle to track the clip's contact speed:
+Each clip carries a monotonic **`ClimbDistance`** float curve: cumulative along-wall travel in cm, 0 at frame 0 → the stride at the end (flat = hold/reach, steep = pull). Bake it from the root-motion sibling's root path with **`URogueClimbDistanceBaker`** (editor Animation Modifier), then hand-tune keys. Each pre-sim tick:
 
 ```
-v_body(phase)  = baseSpeed · cadence(phase),   mean(cadence) = 1
-cadence(phase) = curve(phase) / ClimbCadenceReferenceSpeed
-// baseSpeed  = fraction · ClimbMaxSpeed. It is what gameplay wants: input amount × your tuned cap
+d_now  = blended ClimbDistance            // anim-instance curve read, same path as the stance curves
+Δd     = d_now − d_prev                   // + stride ONLY if it dropped ~a full stride in one tick (loop-seam wrap)
+v_body = Δd / dt                          // along-wall MAGNITUDE; DIRECTION stays the solver's
 ```
 
-`curve` = a float curve authored **on each clip** (`MovementSpeed`): ~0 at each reach, peak at each pull. The mode reads the *blended* value each tick and scales along-wall velocity by it. Riding on the anim, it is:
+Riding on the anim, it is:
 
 - **phase-locked** — the body's pull lands on the anim's pull; no separate sim phase to drift,
-- **auto-shaped** — the clip's asymmetric two pulses (big, then small ~⅓) are baked in, no hand-tuning,
+- **auto-shaped** — the clip's asymmetric two pulses (big, then small ~⅓) are in the curve, no hand-tuned surge,
+- **playrate-proof** — the curve advances by `playrate · dt`, so body speed scales with playrate automatically → **playrate IS the climb-speed knob**. No reference speed, no `V_clip`, nothing to keep consistent,
 - **blendspace-correct** — direction curves blend, so diagonals stay consistent (a curveless direction dilutes the blend → *every* clip needs the curve).
 
-`mean(cadence) = 1` keeps average speed `= baseSpeed`; the Step-A residual now cancels *every instant*.
+```
+playrate = GetClimbMoveSpeedFraction() · scale    // scale = free motion-speed multiplier (e.g. 1.5 = 50% faster climb)
+```
 
-**Reference speed.** `MovementSpeed` is absolute cm/s; set `ClimbCadenceReferenceSpeed` = its average (root travel ÷ loop time) to make it mean-1. One shared reference across directions preserves the clips' *relative* speeds.
+**Blended-curve gotchas (both shipped).** Differencing a *blended* curve is fragile — crossfades and per-direction phase offsets make it non-monotonic:
 
-**Deadlock caveat.** Playrate must advance from a *steady* speed, not the surged one — else `cadence→0 ⇒ speed→0 ⇒ playrate→0` freezes the anim at the reach:
+- **Wrap detection needs a real jump.** Only a one-tick drop of more than half a stride is a loop-seam wrap; a gradual decrease (crossfade to idle, diagonal phase mismatch) is *zero* advance. An "any negative = wrap" rule added a full stride every tick of the move→idle blend-out → the body lunged forward a long way after release.
+- **Input gate.** At push ≤ `FootPlantIdleInputDeadzone` (the limb-IK idle threshold) the curve stops driving and the solver's `ClimbDeceleration` brakes the body to a stop. The curve keeps genuinely advancing while the move clip blends out — ungated, the body glides on with no input.
+
+**`ClimbMaxSpeed` is only a safety cap** on a spiking blended curve (fast direction change, authoring error). It caps the *instantaneous* speed — the pull peak, not the average — so keep it above `peak ClimbDistance slope × max playrate`, or it clips real pulls and the planted limbs skate.
+
+**Deadlock caveat (still applies).** Playrate must come from the *steady* push, never from the body speed — else a flat hold ⇒ speed 0 ⇒ playrate 0 freezes the anim at the reach:
 
 ```
 playrate = GetClimbMoveSpeedFraction() · scale   // steady round push amount, NOT |GetClimbMoveIntent()|
-v_body   = surged (Step B)
+v_body   = from ClimbDistance
 ```
+
+*History:* this replaced (2026-10-31) a speed-led model — body at `fraction · ClimbMaxSpeed`, playrate synced to it via `scale = ClimbMaxSpeed / V_clip` (matched only the loop average), plus a per-clip cadence surge curve ÷ `ClimbCadenceReferenceSpeed` (to match the instant). Three numbers had to stay consistent; the distance curve inverts the authority so only the curve has to be right.
 
 ### Input geometry — round stick → square blendspace
 
@@ -143,17 +290,18 @@ blendspace PLAYRATE ← GetClimbMoveSpeedFraction()  // round scalar = min(1, |r
 physics DIRECTION   ← WallMoveDir (normalized)     // round    (so diagonals aren't √2× faster)
 ```
 
-`|GetClimbMoveIntent()|` would be `√2` on a diagonal → plays 1.41× too fast (skate), though the body moves at `ClimbMaxSpeed` in every direction. The square remap is *anim-only*.
+`|GetClimbMoveIntent()|` would be `√2` on a diagonal → plays 1.41× too fast — and since the body follows the anim, it would *move* 1.41× too fast too. The square remap is for the blendspace *axes* only.
 
 ### Code touchpoints
-- `GetClimbCadenceScale()` — reads `ClimbCadenceCurveName` off the mesh, ÷ `ClimbCadenceReferenceSpeed`; returns 1 when absent.
-- `RogueClimbMode::GenerateMove` — `LinearVelocity *= GetClimbCadenceScale()` (along-wall only; into-wall bias unscaled).
+- `RefreshClimbDistanceSpeed()` (pre-sim) — reads `ClimbDistanceCurveName` off the anim instance; wrap detection + input gate → `GetClimbAlongWallSpeed()`.
+- `RogueClimbMode::GenerateMove` — `LinearVelocity = solverDir · min(v_body, ClimbMaxSpeed)` (along-wall only; into-wall standoff unscaled). Invalid (idle / curve missing) → the solver's own velocity stands (brakes with no input).
+- `URogueClimbDistanceBaker` (editor module) — bakes `ClimbDistance` onto the in-place clip from its root-motion sibling's root path (`AxisWeights`, `DistanceScale` to trim).
 - `GetClimbMoveIntent()` — round intent (`ComputeRoundClimbWallIntent`) → `CircleToSquare` → blendspace **axes**.
 - `GetClimbMoveSpeedFraction()` — `min(1, |round intent|)` → blendspace **playrate**.
 - Playrate wiring + per-clip curves are AnimBP / asset-side.
 
 ### Why scalar, not full root motion
-The clip drives along-wall *magnitude* only; the mode keeps *direction* (wall plane) + player control. Full root-motion climb fights Mover (fixed-tick + rollback + looping blendspace) and arbitrary geometry for a cadence this curve already gives. Determinism is a *networking* concern, moot for single-player / Standalone. Root motion + motion warping is reserved for **discrete traversals** (mantle, corner turns) on known geometry.
+The clip drives along-wall *magnitude* only; the mode keeps *direction* (wall plane) + player control. Full root-motion climb fights Mover (fixed-tick + rollback + looping blendspace) and arbitrary geometry for a rhythm the distance curve already gives (it is, in effect, scalar root motion). Determinism is a *networking* concern, moot for single-player / Standalone. Root motion + motion warping is reserved for **discrete traversals** (mantle, corner turns) on known geometry.
 
 ## Traversals: mantle & corner turns (hybrid)
 - Sustained climb stays **procedural** (grid → dominant plane → orient + IK, BOTW-like); mantle and corner turns are **authored, motion-warped root-motion clips** (AC/Uncharted style, matching the anim packs). BOTW-style tutorials only cover sustained climb + a basic top-out, not these authored clips.
@@ -304,7 +452,7 @@ Mid = strike 1 (round the corner), End = strike 2 (onto the new face) — matchi
 
 ## Corner turns — input-driven turn (C++ done; clips + AnimBP pending)
 
-**Why not BOTW-style.** BOTW (as far as footage shows) has no corner clips: the corner is just a sharp bend in the sustained climb — an *in-place, smooth-paced* cycle, so the body can follow any procedural path and the facing simply turns. Our climb clips are *impulse*-paced (timing baked in → Step B), and the corner clips are **root motion** — they encode the *path* (the arc round the edge) as well as the timing. Swap the path for a procedural one and the hands slide. So an input-driven turn must keep the clip's path and timing coupled.
+**Why not BOTW-style.** BOTW (as far as footage shows) has no corner clips: the corner is just a sharp bend in the sustained climb — an *in-place, smooth-paced* cycle, so the body can follow any procedural path and the facing simply turns. Our climb clips are *impulse*-paced (timing baked in → the `ClimbDistance` curve), and the corner clips are **root motion** — they encode the *path* (the arc round the edge) as well as the timing. Swap the path for a procedural one and the hands slide. So an input-driven turn must keep the clip's path and timing coupled.
 
 **The stick drives the clip's PLAYHEAD.** `t += push · CornerTurnPlayRate · dt`; the capsule goes to `Warped(t)` (the clip's own root path) and the AnimBP evaluates the pose at the same `t`. One parameter drives both, so the hands stay phase-locked at **any** push — stopped or reversing included. (This is what Steps A+B approximate for the in-place climb; with root motion it's exact.)
 
@@ -359,12 +507,12 @@ The custom warp works better in replication. It is still a step function with mi
 
 **Done**
 1. **Sustained climb** — detection sweep → 3×5 coverage grid → dominant-plane orient; custom `URogueClimbMode` + contextual entry/exit transition.
-2. **Climb anim sync** — 8-dir blendspace, playrate sync (Step A) + per-clip velocity surge (Step B), round→square input remap.
+2. **Climb anim sync** — 8-dir blendspace, distance-curve speed (body follows the anim via per-clip `ClimbDistance`, baked from the root-motion siblings), round→square input remap.
 3. **Mantle top-out** — first authored traversal: two-phase motion-warped root-motion montage → Walking; established the reusable traversal skeleton.
 
 **Next — big milestones, roughly ordered**
 4. **Lower-body hang blend** — *C++/detection done* (gross `IsLowerBodyHanging()` now = BOTH feet without a foothold, from the per-foot probes; hand-purchase gate replaced the coverage ratio; `CanMoveWhileClimbing()` locks traversal to a single handhold; `GetClimbMoveSpeedFraction()` gated to 0 when locked). **Remaining (AnimBP):** `FInterpTo` the hang bool into an alpha, then blend per the *Hang anim recipe* above — `Blend(braced, Blend(hang_idle, climb_move ⊕ dangle_legs, speedFraction), hangAlpha)` — plus a subtle dead-hang sway.
-5. **Per-foot / per-hand IK (Control Rig)** — *foot probe done (C++ detection: `ProbeFoot`/`RefreshFootProbes`, foot-following sphere sweep → `LeftFootProbe`/`RightFootProbe`).* **Remaining:** the actuators — per-foot **procedural tuck** on `bHanging` (the artifact fix, do first) then two-bone **plant IK** to `TargetLocation`/`TargetNormal` with interp/hysteresis; then hands. Design in *Per-limb refinement* + *Procedural tuck* above.
+5. **Per-foot / per-hand IK (Control Rig)** — *done and in use*: predictive placement for the sustained climb (offline contact baker + `ClimbPhase`, destination-clip stance weight, approach→lock, target spring), the full stop/release handling (**Stopping well** — bad-segment skip, staged contralateral retreat, Bézier swing + peel, weight shift with hip-in and chest, reach leash + reach cap, clip-switch blend), and reactive two-face pins for corner turns; the Control Rig consumes `Weight` + `LocalLocation`/`LocalNormal` and `ClimbBodyShift` / `ClimbChestRotation`. Full design in **Limb IK — stance pins** and **Stopping well — the idle retreat** above. **Remaining:** a dead-hang special case for the reach cap; the per-foot **procedural tuck** on `bHanging`. (Sync markers for phase-aligned in-between blends are deferred: climbing is 8-directional for now, so the blendspace sits on one clip except while changing direction.)
 6. **Corner turns** — *C++ done*: probe + debug draw (*Corner turns — probe*) and the input-driven turn (*Corner turns — input-driven turn*: stick-driven playhead, settle-to-rest, deterministic per-strike warp onto Mid/End, plane seeding). **Remaining:** clip setup (root yaw check, Force Root Lock, `CornerRest` notify, assign the 4 clips), AnimBP corner state (Sequence Evaluator + hang-legs layer + masked breathing additive), then in-editor tuning (commit fractions, Mid/End offsets via the silver ghosts).
 7. **Climb feel polish** — wall-distance vs into-wall bias; **edge-clamp** (don't walk off a side edge — a cheap safety add-on).
 8. **Uneven surfaces** — climb across surface intersections / non-planar geometry.
@@ -372,6 +520,40 @@ The custom warp works better in replication. It is still a step function with mi
 **Later polish** — ledge shimmy; stamina + UI.
 
 ## TODO
+
+Confirmed: a Blend Space Player that isn't in a sync group ticks as a single-animation context, and in that case it syncs its samples by marker automatically once they have markers. So authoring these markers also gives you the phase-aligned diagonal blends that were still pending.
+
+## (1) Strike commit: done
+
+Your choices are implemented as you specified. I haven't compiled it; the header changed, so do a full rebuild.
+
+**How it works:**
+- **Decision:** `IsPastClimbStrikeCommit()` takes the dominant clip and the live `ClimbPhase`, and asks whether the most recent strike marker before the playhead is a `StrikeCommit`. The check wraps around the loop. That single check both **starts** the commit (on release) and **ends** it, because crossing `StrikeEnd` flips the answer.
+- **Mechanism:** the game keeps holding the stick for you. `ProduceInput` now gets its climb input from `MoverComp->ResolveClimbMoveInput(raw)`. That passes the raw input through and remembers it. On a release past a commit marker, it keeps returning the last input until the strike end, then clears it for good, so nothing can re-commit while idle. The anim, the `ClimbDistance` body speed, the IK and the retreat timer all read input, so they finish the strike together with no special cases. After the strike end it's the normal idle + retreat.
+- Release before a commit marker behaves as before. A clip with no markers never commits. `bCommitClimbStrikes` toggles the whole thing for A/B testing.
+
+**Your authoring, on each of the 8 clips:** add sync markers `StrikeCommit` → `StrikeEnd` for each strike, so four per clip. Use the same names in the same order on every clip. Strike 2's `StrikeEnd` can sit on the last frame or on frame 0; the loop handling covers both.
+
+**One AnimBP check:** the climb move→idle transition must use `GetClimbMoveSpeedFraction()`, not raw key state. Otherwise the anim leaves the move state while the body is still finishing. With the debug cvar on, you'll see `[ClimbStrike] released past the commit marker…` and `…reached the strike end` in the log.
+
+## (2) Spider-style stepping: real projects
+
+- **[PhilS94 – Unity Procedural IK Wall-Walking Spider](https://github.com/PhilS94/Unity-Procedural-IK-Wall-Walking-Spider)** ([showcase video](https://www.youtube.com/watch?v=4Ff9XeACUH4)). The closest match to climbing: it walks on walls, around corners and on ceilings. A leg steps when its IK can no longer reach. The target is predicted from an anchor plus the body's expected travel, then raycast onto the surface. A step manager decides which legs may step: a queue, or an "alternating tetrapod gait". The README doesn't describe the arc itself; that's in the code.
+- **[80.lv – IK-driven procedural spider in Godot 4.5](https://80.lv/articles/ik-driven-procedural-spider-locomotion-in-godot-4-5)**. A raycast step sensor, a destination predicted from velocity, and the foot moves there in an arc. Legs move in **diagonal pairs, one pair at a time**.
+- **[mmmeri/ue-procedural-limbs](https://github.com/mmmeri/ue-procedural-limbs)**. Unreal (UE4, Blueprints). A per-limb `LimbAnimator` plus a `LimbCoordinator` that stops neighbouring limbs moving at once, and the body leans on springs in response. It includes a GIF demo, and it's the closest to your engine.
+- **[80.lv – procedural spider animation in UE5](https://80.lv/articles/tutorial-procedural-spider-animation-in-unreal-engine-5)**. A video tutorial over an hour long for multi-legged walks in UE5.
+- **[Robin Six – procedurally animated spider](https://sixrobin.itch.io/proceduralspider)**. A small, readable project, inspired by Codeer's well-known clips.
+- **Talks:** David Rosen's GDC 2014 ["An Indie Approach to Procedural Animation"](https://discussions.unity.com/t/an-indie-approach-to-procedural-animation-gdc-video-talk/538228) (Overgrowth), which covers lively motion from very few keyframes. "The Rain World Animation Process" (GDC 2016, [background](https://unity.com/en/blog/exploring-procedural-design-rain-world)), about limbs as points driven by code.
+
+**What to look for in them:**
+- **The step itself.** Watch how quickly the foot lifts, how high the arc goes, and whether it sets down softly.
+- **Coordination.** It matches what you designed independently: diagonal pairs, one group at a time, a manager deciding who moves. Our sequencer is that manager.
+- **The difference from our case.** They step continuously while walking. We only need the arc for IK-driven retreats, because the clips already handle the swings during movement.
+- **The body's response.** In the better ones the body shifts onto the supporting legs as one lifts. That's the weight-shift layer on our list.
+
+None of these pages states a step-arc formula outright, so for the exact curve you'd read the code. The Bézier lift-travel-place path from my last message is the standard choice. Tell me if it matches what you see in these and I'll build it.
+
+- Sync markers for diagnoal blends
 
 - Corner turns fail cases:
   - Tilted walls
@@ -393,7 +575,7 @@ The custom warp works better in replication. It is still a step function with mi
 
 - Custom anim graph nodes for better performance?
 
-- Camera zooming out when climbing.
+- Camera zooming out when climbing.                     
 
 - Precise mantle up (use hand pos as probe)?
 
