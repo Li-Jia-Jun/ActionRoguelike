@@ -36,7 +36,7 @@ struct FRogueClimbLimbPlant
 
 /**
  * One limb's baked contacts for a clip. Climb-walk clips are TWO-strike (a big stride then a small ~1/3 stride - see
- * Climbing_Design.md "Animation <-> movement sync"), so a limb plants more than once per clip; hence an ARRAY of plants
+ * Docs/climb/movement-sync.md), so a limb plants more than once per clip; hence an ARRAY of plants
  * (sorted by time). LimbId is the limb's stance-curve name, so the runtime can both find these landings and read the curve
  * of the same name as the limb's IK blend profile.
  */

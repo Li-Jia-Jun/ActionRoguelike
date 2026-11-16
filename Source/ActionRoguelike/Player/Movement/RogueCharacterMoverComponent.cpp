@@ -29,11 +29,21 @@
 #include "Engine/World.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshSocket.h"
-#include "Kismet/KismetMathLibrary.h"
 #include "Curves/CurveFloat.h"
 
 TAutoConsoleVariable<bool> CVarClimbingDebugDrawing(TEXT("game.climbing.DebugDraw"), true,
 	TEXT("Enable climbing mover component debug rendering. (0 = off, 1 = enabled)"),
+	ECVF_Cheat);
+
+TAutoConsoleVariable<bool> CVarClimbingDebugLeash(TEXT("game.climbing.DebugLeash"), false,
+	TEXT("Log every reach-leash drag: which way it went (along the clip's line, or to the nearest spot in reach), on the map or ")
+	TEXT("the plane, why, the limit (leash ratio or the hold's plant distance), and how much of the drag was vertical. (0 = off, 1 = enabled)"),
+	ECVF_Cheat);
+
+TAutoConsoleVariable<bool> CVarClimbingDebugSurfaceMap(TEXT("game.climbing.DebugSurfaceMap"), true,
+	TEXT("Draw the climb surface map: the surface it found (teal points + wireframe + normals), the gap between the flat wall the ")
+	TEXT("clips are authored on and the real surface (orange = surface behind it, a flat-wall pose floats there; blue = in front, ")
+	TEXT("it would sink in), empty cells (red), and a gap readout. (0 = off, 1 = enabled)"),
 	ECVF_Cheat);
 
 
@@ -173,6 +183,33 @@ namespace
 		return Length;
 	}
 
+	// The contact point (a socket, or a bone tip such as the ball) as (the bone it hangs off, offset in that bone's space).
+	void ComputeLimbContact(const USkeletalMesh& Asset, FName TipName, FName& OutBone, FVector& OutOffset)
+	{
+		OutBone = NAME_None;
+		OutOffset = FVector::ZeroVector;
+		if (const USkeletalMeshSocket* Socket = Asset.FindSocket(TipName))
+		{
+			OutBone = Socket->BoneName;
+			OutOffset = Socket->RelativeLocation;
+			return;
+		}
+		const FReferenceSkeleton& RefSkeleton = Asset.GetRefSkeleton();
+		const int32 TipIndex = RefSkeleton.FindBoneIndex(TipName);
+		if (TipIndex == INDEX_NONE)
+		{
+			return;
+		}
+		const int32 ParentIndex = RefSkeleton.GetParentIndex(TipIndex);
+		if (ParentIndex == INDEX_NONE)
+		{
+			OutBone = TipName;
+			return;
+		}
+		OutBone = RefSkeleton.GetBoneName(ParentIndex);
+		OutOffset = RefSkeleton.GetRefBonePose()[TipIndex].GetTranslation();
+	}
+
 	// Map a round (unit-circle) stick direction onto the unit square so full diagonals reach the blendspace
 	// corners. Preserves push magnitude: the L-infinity norm (max component) of the result equals the input
 	// length, so a half-pushed diagonal lands halfway out and nothing overshoots the axis range.
@@ -249,6 +286,7 @@ void URogueCharacterMoverComponent::HandlePreSimulationTick(const FMoverTimeStep
 	}
 	SweepAndStoreWallHits();
 	RefreshClimbSurfaceInfo();
+	RefreshClimbSurfaceMap();     // the wall around the climber marched over the surface (needs this tick's dominant plane)
 	RefreshClimbDistanceSpeed(); // along-wall speed from the authored ClimbDistance curve
 	RefreshFootProbes();   // per-foot foothold probes + the both-feet gross-hang flag (self-gates on IsClimbing)
 	RefreshLimbPins();     // per-limb world-locked plant/grip pins for the Control Rig (predictive climb, reactive corner)
@@ -967,6 +1005,13 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 		const FVector P2 = CornerTurn.NewWallLocation;
 		const FVector Center = Updated->GetComponentLocation();
 
+		// Corner pins are reactive and world-locked - nothing APPROACHES here. Clear a flag left over from the climb, or the
+		// IK follow would carry that limb's target with the body and the reach leash would skip it.
+		for (FClimbLimbPin* Pin : AllPins)
+		{
+			Pin->bApproaching = false;
+		}
+
 		auto ProbeCorner = [this, N1, P1, N2, P2](const FVector& FromLoc, float Radius, float Reach, float Backoff) -> FClimbHandGrip
 		{
 			const FClimbHandGrip G1 = ProbeContactToward(FromLoc, N1, P1, Radius, Reach, Backoff);
@@ -1029,16 +1074,13 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 		float DominantWeight = 0.0f;
 		const UAnimSequence* DominantClip = bIdle ? ClimbIdleClip.Get() : GetDominantClimbClip(DominantWeight);
 
-		// Blendspace CLIP SWITCH while moving (a direction change): every limb's destination just changed. Open the blend window
-		// (the resolver eases weights instead of dropping them) and let each limb's target ease past the spring's teleport guard.
-		// Same-clip progress never lands here (the clip doesn't change), nor do idle<->move edges (the last clip is cleared at idle).
+		// Blendspace CLIP SWITCH while moving (a direction change): every limb's destination just changed. Open the blend window:
+		// the IK follow (target and weight) runs at the pose's crossfade rate, and the resolver eases weights out instead of
+		// dropping them. Same-clip progress never lands here (the clip doesn't change), nor do idle<->move edges (the last clip
+		// is cleared at idle).
 		if (!bIdle && DominantClip && LastDominantClimbClip.IsValid() && LastDominantClimbClip.Get() != DominantClip)
 		{
 			ClimbClipSwitchMs = LastPreSimTimeMs;
-			for (FClimbLimbPin* Pin : AllPins)
-			{
-				Pin->bClipSwitchEase = true;
-			}
 			if (CVarClimbingDebugDrawing.GetValueOnGameThread())
 			{
 				UE_LOG(LogTemp, Log, TEXT("[ClimbIK] blendspace clip switch: %s -> %s (limbs blend over %.2fs, from the blendspace)"),
@@ -1073,10 +1115,10 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 			AdvanceIdleRetreat();
 		}
 
-		ResolveLimbPinPredictive(LeftFootPin,  LeftFootStanceCurveName,  DominantClip, MeshXform, WallNormal, PlanePoint, FootProbeRadius, FootProbeReach, FootProbeBackoff, bIdle);
-		ResolveLimbPinPredictive(RightFootPin, RightFootStanceCurveName, DominantClip, MeshXform, WallNormal, PlanePoint, FootProbeRadius, FootProbeReach, FootProbeBackoff, bIdle);
-		ResolveLimbPinPredictive(LeftHandPin,  LeftHandStanceCurveName,  DominantClip, MeshXform, WallNormal, PlanePoint, HandProbeRadius, HandProbeReach, HandProbeBackoff, bIdle);
-		ResolveLimbPinPredictive(RightHandPin, RightHandStanceCurveName, DominantClip, MeshXform, WallNormal, PlanePoint, HandProbeRadius, HandProbeReach, HandProbeBackoff, bIdle);
+		ResolveLimbPinPredictive(LeftFootPin, RogueClimbLimb::LeftFoot, LeftFootStanceCurveName,  DominantClip, MeshXform, WallNormal, PlanePoint, FootProbeRadius, FootProbeReach, FootProbeBackoff, bIdle);
+		ResolveLimbPinPredictive(RightFootPin, RogueClimbLimb::RightFoot, RightFootStanceCurveName, DominantClip, MeshXform, WallNormal, PlanePoint, FootProbeRadius, FootProbeReach, FootProbeBackoff, bIdle);
+		ResolveLimbPinPredictive(LeftHandPin, RogueClimbLimb::LeftHand, LeftHandStanceCurveName,  DominantClip, MeshXform, WallNormal, PlanePoint, HandProbeRadius, HandProbeReach, HandProbeBackoff, bIdle);
+		ResolveLimbPinPredictive(RightHandPin, RogueClimbLimb::RightHand, RightHandStanceCurveName, DominantClip, MeshXform, WallNormal, PlanePoint, HandProbeRadius, HandProbeReach, HandProbeBackoff, bIdle);
 	}
 
 	// Convert each world pin into the MESH COMPONENT's space for the Control Rig (its effectors are component-space;
@@ -1086,6 +1128,7 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 	{
 		const FTransform MeshXform = Mesh->GetComponentTransform();
 		const float Dt = LastPreSimDeltaSeconds;
+		const float FollowSpeed = GetLimbIKFollowSpeed();
 		for (int32 Limb = 0; Limb < RogueClimbLimb::Count; ++Limb)
 		{
 			FClimbLimbPin* Pin = AllPins[Limb];
@@ -1098,59 +1141,34 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 			FVector SmoothNormal = Pin->Normal;
 			if (Pin->bRegripSwing && bRegripArc && Pin->Weight > KINDA_SMALL_NUMBER)
 			{
-				// An re-grip SWING: the lift-travel-place arc IS the motion (smooth by construction), so it replaces the
-				// spring, which would lag behind it and flatten it. Park the spring at rest on the arc point so it takes over
+				// A re-grip SWING: the lift-travel-place arc IS the motion (smooth by construction), so it replaces the follow,
+				// which would lag behind it and flatten it. The follow is parked on the arc point below, so it takes over
 				// seamlessly when the swing lands (the arc ends exactly on the target).
 				SmoothWorld = EvaluateRegripSwing(*Pin, RawWorld, SmoothNormal);
-				Pin->SpringSmoothedWorld = SmoothWorld;
-				Pin->SpringPrevTarget = RawWorld;
-				Pin->SpringVelocity = FVector::ZeroVector;
-				Pin->bSpringValid = false;
 			}
 			else
 			{
-				// Spring-smooth the WORLD target so a pin that ACQUIRES or RELOCATES (re-grab, corner face-switch) eases to its
-				// new spot over a few frames instead of popping. It smooths the WORLD value, which is constant while a pin is
-				// held, so a settled plant gets ZERO added lag - the spring only absorbs target JUMPS. SNAP (and reset the spring)
-				// when the limb isn't visibly IK'd (Weight ~ 0), the spring is off, there's no dt, or the jump is a teleport
-				// (bigger than LimbIKSpringSnapDistance - a far relocation / a stale first acquire), so we never ease across a jump
-				// we don't want to. A re-grip move (arc off) is exempt from the teleport guard: it's an INTENDED long move
-				// starting from the limb's live (fresh) target, so it eases however far it goes.
-				const bool bTeleport = !Pin->bRegripSwing && !Pin->bClipSwitchEase
-					&& FVector::DistSquared(RawWorld, Pin->SpringSmoothedWorld) > FMath::Square(LimbIKSpringSnapDistance);
-				const bool bSnap = !bUseLimbIKSpring || Pin->Weight <= KINDA_SMALL_NUMBER || Dt <= 0.0f || bTeleport;
-
+				// IK FOLLOW (LimbIKFollowSpeed): the shown target chases the raw one, so an acquire or a relocation (a direction
+				// change, a corner face switch, a re-grip with the arc off) eases over instead of popping. No lag where nothing
+				// jumped: a HELD target is world-fixed, and an APPROACHING target rides with the body - so the followed point is
+				// first carried along by the body's motion since last tick, then chases. A limb that wasn't shown last tick
+				// (weight 0) starts AT its target: it never eases in from a stale point (e.g. the hold it left a swing ago).
+				const bool bSnap = !Pin->bFollowValid || FollowSpeed <= 0.0f || Dt <= 0.0f;
 				if (bSnap)
 				{
 					SmoothWorld = RawWorld;
-					Pin->SpringSmoothedWorld = RawWorld;
-					Pin->SpringPrevTarget = RawWorld;
-					Pin->SpringVelocity = FVector::ZeroVector;
-					Pin->bSpringValid = false;
 				}
 				else
 				{
-					// Rebuild the engine spring state from our mirrored fields (keeps KismetMathLibrary out of the header).
-					FVectorSpringState State;
-					State.PrevTarget = Pin->SpringPrevTarget;
-					State.Velocity = Pin->SpringVelocity;
-					State.bPrevTargetValid = Pin->bSpringValid;
-					// TargetVelocityAmount = 0: we are smoothing a jumpy signal, not chasing a target's velocity (per the API docs).
-					SmoothWorld = UKismetMathLibrary::VectorSpringInterp(Pin->SpringSmoothedWorld, RawWorld, State,
-						LimbIKSpringStiffness, LimbIKSpringCriticalDamping, Dt, /*Mass*/ 1.0f, /*TargetVelocityAmount*/ 0.0f);
-					Pin->SpringPrevTarget = State.PrevTarget;
-					Pin->SpringVelocity = State.Velocity;
-					Pin->bSpringValid = State.bPrevTargetValid;
-					Pin->SpringSmoothedWorld = SmoothWorld;
+					FVector From = Pin->FollowWorld;
+					if (Pin->bApproaching && bHasLimbFollowMeshXform)
+					{
+						From = MeshXform.TransformPosition(LimbFollowMeshXform.InverseTransformPosition(From));
+					}
+					SmoothWorld = FMath::VInterpTo(From, RawWorld, Dt, FollowSpeed);
 				}
 
-				// A clip-switch ease ends once the eased target has caught up (or the limb isn't visibly IK'd any more).
-				if (Pin->bClipSwitchEase && (bSnap || FVector::DistSquared(SmoothWorld, RawWorld) <= FMath::Square(1.0f)))
-				{
-					Pin->bClipSwitchEase = false;
-				}
-
-				// A re-gripping limb (arc off) has ARRIVED once its eased target reaches its new grip (or there was nothing to
+				// A re-gripping limb (arc off) has ARRIVED once its followed target reaches its new grip (or there was nothing to
 				// ease) - the idle-retreat sequencer waits on this before starting its next step.
 				if (Pin->bRegripSwing
 					&& (bSnap || FVector::DistSquared(SmoothWorld, RawWorld) <= FMath::Square(RegripArrivalTolerance)))
@@ -1158,6 +1176,8 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 					Pin->bRegripSwing = false;
 				}
 			}
+			Pin->FollowWorld = SmoothWorld;
+			Pin->bFollowValid = Pin->Weight > KINDA_SMALL_NUMBER;
 
 			// Reach cap: never hand the rig a point the limb can't reach (bCapLimbReach). Visual only - the spring above and the
 			// pin keep the real target, so the cap fades out by itself as the target comes back in reach. Only for a limb the IK
@@ -1181,11 +1201,180 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 #endif
 			Pin->LocalLocation = MeshXform.InverseTransformPosition(ShownWorld);
 			Pin->LocalNormal = MeshXform.InverseTransformVectorNoScale(SmoothNormal);
+
+			// The reach the Climb Surface Warp node must respect: the leash limit (in component space, like the rig) and the
+			// point it's measured to.
+			const float MeshScale = static_cast<float>(Mesh->GetComponentScale().X);
+			Pin->Reach.Limit = (MeshScale > KINDA_SMALL_NUMBER) ? GetLimbLeashLimit(Mesh, Limb) / MeshScale : 0.0f;
+			GetLimbContact(Mesh, Limb, Pin->Reach.ContactBone, Pin->Reach.ContactOffset);
 		}
+		LimbFollowMeshXform = MeshXform;
+		bHasLimbFollowMeshXform = true;
 	}
 
 	// After the pins (a re-grip swing that landed this tick has re-loaded its limb): the body's weight shift.
 	RefreshClimbWeightShift(Mesh);
+	RefreshLimbIKPlanes(Mesh);
+}
+
+void URogueCharacterMoverComponent::RefreshLimbIKPlanes(const USkeletalMeshComponent* Mesh)
+{
+	ClimbLimbIKPlanes.Reset();
+	if (!bPublishLimbIKWallPlanes || !Mesh)
+	{
+		return;
+	}
+
+	// Mesh space, like the pins: the Control Rig works in component space.
+	const FTransform MeshXform = Mesh->GetComponentTransform();
+	auto AddPlane = [this, &MeshXform](const FVector& Point, const FVector& Normal)
+	{
+		if (Normal.IsNearlyZero())
+		{
+			return;
+		}
+		FRogueLimbIKPlane& Plane = ClimbLimbIKPlanes.AddDefaulted_GetRef();
+		Plane.Point = MeshXform.InverseTransformPosition(Point);
+		Plane.Normal = MeshXform.InverseTransformVectorNoScale(Normal.GetSafeNormal());
+		Plane.Margin = LimbIKWallMargin;
+	};
+
+	if (IsClimbing())
+	{
+		AddPlane(ClimbDominantSurfaceLocationCache, ClimbDominantSurfaceNormalCache);
+	}
+	else if (IsCornerTurning() && CornerTurn.Type == ERogueClimbCornerType::Inner)
+	{
+		// Concave: the free space is in front of BOTH faces. (Convex: the union of two half-spaces - no plane describes it.)
+		AddPlane(CornerTurn.OldWallLocation, CornerTurn.OldWallNormal);
+		AddPlane(CornerTurn.NewWallLocation, CornerTurn.NewWallNormal);
+	}
+}
+
+void URogueCharacterMoverComponent::RefreshClimbSurfaceMap()
+{
+	const USceneComponent* Updated = GetUpdatedComponent();
+	UWorld* World = GetWorld();
+	const FVector N = ClimbDominantSurfaceNormalCache.GetSafeNormal();
+	const bool bCanBuild = bBuildClimbSurfaceMap && IsClimbing() && Updated && World && !N.IsZero();
+
+	// The pose warp's strength: eased toward 1 while the map is being built, toward 0 otherwise.
+	const float WarpTarget = (bCanBuild && bClimbSurfaceWarp) ? 1.0f : 0.0f;
+	ClimbSurfaceWarpWeight = (ClimbSurfaceWarpBlendSpeed > 0.0f && LastPreSimDeltaSeconds > 0.0f)
+		? FMath::FInterpTo(ClimbSurfaceWarpWeight, WarpTarget, LastPreSimDeltaSeconds, ClimbSurfaceWarpBlendSpeed)
+		: WarpTarget;
+
+	if (!bCanBuild)
+	{
+		// Off the wall (a mantle, a corner turn, a fall): keep the LAST map while the warp fades out - it's world space, so it
+		// still describes that surface - then drop it.
+		if (ClimbSurfaceWarpWeight <= 0.01f)
+		{
+			ClimbSurfaceWarpWeight = 0.0f;
+			ClimbSurfaceMap.bValid = false;
+		}
+		return;
+	}
+
+	// Frame: the capsule centre projected onto the dominant plane (the flat wall the clips are played against), with Up =
+	// gravity flattened onto it - the same wall frame as the weight shift.
+	const FVector Center = Updated->GetComponentLocation();
+	const FVector Origin = Center - N * FVector::DotProduct(Center - ClimbDominantSurfaceLocationCache, N);
+
+	// MARCHED over the surface (FClimbSurfaceMap::Build): one start cell traced straight into the wall, every other cell
+	// stepped to one spacing along the surface from a neighbour - so the grid wraps round a curve. Line traces, not spheres: a
+	// sphere's first contact on a curved surface is off its centre line, which is exactly the error this map exists to remove.
+	FClimbSurfaceMapBuildSettings Settings;
+	Settings.Columns = ClimbSurfaceMapColumns;
+	Settings.Rows = ClimbSurfaceMapRows;
+	Settings.Min = FVector2D(-ClimbSurfaceMapHalfWidth, ClimbSurfaceMapBottom);
+	Settings.Max = FVector2D(ClimbSurfaceMapHalfWidth, ClimbSurfaceMapTop);
+	Settings.FrontReach = ClimbSurfaceMapFrontReach;
+	Settings.BackReach = ClimbSurfaceMapBackReach;
+	Settings.MaxTurnPerCellDegrees = ClimbSurfaceMapMaxTurnPerCell;
+	const FVector UpDirection = GetUpDirection();
+	ClimbSurfaceMap.Build(Origin, N, UpDirection, Settings,
+		[this, World, &UpDirection](const FVector& Start, const FVector& End, FClimbSurfaceMapHit& OutHit)
+		{
+			FHitResult Hit;
+			if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, ClimbQueryParams) || Hit.bStartPenetrating)
+			{
+				return false; // nothing there (a hole, past an edge), or the trace began inside geometry
+			}
+			OutHit.Point = Hit.ImpactPoint;
+			OutHit.Normal = Hit.ImpactNormal;
+			// The same wall rule as every climb probe (near-vertical, not walkable): a floor under the feet or a ledge top stops
+			// the march there.
+			OutHit.bClimbable = IsSurfaceClimbable(static_cast<float>(FVector::DotProduct(Hit.ImpactNormal, UpDirection)));
+			return true;
+		});
+	if (!ClimbSurfaceMap.bValid)
+	{
+		return;
+	}
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarClimbingDebugSurfaceMap.GetValueOnGameThread())
+	{
+		const FColor SurfaceColor(0, 200, 170);   // teal: the surface found
+		const FColor BehindColor(255, 140, 0);    // orange: the cell sits behind its flat-wall spot - a flat-wall pose floats here
+		const FColor InFrontColor(60, 140, 255);  // blue: it sits in front - a flat-wall pose would sink in
+		const FColor PlaneColor(150, 150, 150);
+		int32 NumValid = 0;
+		double MinGap = TNumericLimits<double>::Max();
+		double MaxGap = TNumericLimits<double>::Lowest();
+		for (int32 Row = 0; Row < ClimbSurfaceMap.Rows; ++Row)
+		{
+			for (int32 Column = 0; Column < ClimbSurfaceMap.Columns; ++Column)
+			{
+				const FClimbSurfaceMapCell& Cell = ClimbSurfaceMap.Cell(Column, Row);
+				// The cell's FLAT-wall spot: where the clip's pose has a point with this (s, t) as its (u, v).
+				const FVector OnPlane = ClimbSurfaceMap.PlanePoint(ClimbSurfaceMap.CellUV(Column, Row));
+				if (!Cell.bValid)
+				{
+					DrawDebugPoint(World, OnPlane, 6.0f, FColor::Red, false, -1.0f, 0);
+					continue;
+				}
+				++NumValid;
+				const double Gap = -ClimbSurfaceMap.HeightAbovePlane(Cell.Point);  // > 0 = behind the flat wall
+				MinGap = FMath::Min(MinGap, Gap);
+				MaxGap = FMath::Max(MaxGap, Gap);
+				const FVector Surface = Cell.Point;
+				DrawDebugPoint(World, Surface, 6.0f, SurfaceColor, false, -1.0f, 0);
+				DrawDebugLine(World, Surface, Surface + Cell.Normal * 6.0f, SurfaceColor, false, -1.0f, 0, 0.5f);
+				// Flat spot -> surface cell: how the warp moves the clip's pose here (round a curve it also slides sideways).
+				if (FVector::DistSquared(OnPlane, Surface) > 1.0)
+				{
+					DrawDebugLine(World, OnPlane, Surface, Gap > 0.0 ? BehindColor : InFrontColor, false, -1.0f, 0, 1.0f);
+				}
+				if (Column + 1 < ClimbSurfaceMap.Columns && ClimbSurfaceMap.Cell(Column + 1, Row).bValid)
+				{
+					DrawDebugLine(World, Surface, ClimbSurfaceMap.CellSurfacePoint(Column + 1, Row), SurfaceColor, false, -1.0f, 0, 0.5f);
+				}
+				if (Row + 1 < ClimbSurfaceMap.Rows && ClimbSurfaceMap.Cell(Column, Row + 1).bValid)
+				{
+					DrawDebugLine(World, Surface, ClimbSurfaceMap.CellSurfacePoint(Column, Row + 1), SurfaceColor, false, -1.0f, 0, 0.5f);
+				}
+			}
+		}
+
+		// The flat wall's outline (the grid's extent laid flat on the dominant plane) and a readout of the gap range.
+		const FVector Corners[4] = {
+			ClimbSurfaceMap.PlanePoint(ClimbSurfaceMap.Min),
+			ClimbSurfaceMap.PlanePoint(FVector2D(ClimbSurfaceMap.Max.X, ClimbSurfaceMap.Min.Y)),
+			ClimbSurfaceMap.PlanePoint(ClimbSurfaceMap.Max),
+			ClimbSurfaceMap.PlanePoint(FVector2D(ClimbSurfaceMap.Min.X, ClimbSurfaceMap.Max.Y)) };
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			DrawDebugLine(World, Corners[Index], Corners[(Index + 1) % 4], PlaneColor, false, -1.0f, 0, 0.5f);
+		}
+		const FString Readout = NumValid > 0
+			? FString::Printf(TEXT("surface map %d/%d cells, gap to the flat wall %+.0f .. %+.0f cm"),
+				NumValid, ClimbSurfaceMap.Cells.Num(), MinGap, MaxGap)
+			: FString::Printf(TEXT("surface map 0/%d cells"), ClimbSurfaceMap.Cells.Num());
+		DrawDebugString(World, Corners[2] + ClimbSurfaceMap.Normal * 10.0f, Readout, nullptr, FColor::White, -1.0f, false, 1.0f);
+	}
+#endif
 }
 
 void URogueCharacterMoverComponent::ResolveLimbPin(FClimbLimbPin& Pin, FName StanceCurveName, bool bSurfaceFound,
@@ -1227,6 +1416,7 @@ void URogueCharacterMoverComponent::ResolveLimbPin(FClimbLimbPin& Pin, FName Sta
 			// Acquire: world-lock the pin at the surface hit and remember it (arm grace-hold / freeze use the last pin).
 			Pin.bPinned = true;
 			Pin.Location = SurfaceLocation;
+			Pin.LeashPlantDistance = -1.0f; // the leash measures the new hold's distance
 			Pin.Normal = SurfaceNormal;
 			Pin.bHasLastPin = true;
 			Pin.LastPinLocation = SurfaceLocation;
@@ -1240,6 +1430,7 @@ void URogueCharacterMoverComponent::ResolveLimbPin(FClimbLimbPin& Pin, FName Sta
 			{
 				Pin.bPinned = true;
 				Pin.Location = FallbackLoc;
+				Pin.LeashPlantDistance = -1.0f; // the leash measures the new hold's distance
 				Pin.Normal = FallbackNormal;
 			}
 		}
@@ -1316,6 +1507,19 @@ float URogueCharacterMoverComponent::GetClimbClipSwitchBlendTime() const
 	return FMath::Max(ClimbBlendSpace->InterpolationParam[0].InterpolationTime, ClimbBlendSpace->InterpolationParam[1].InterpolationTime);
 }
 
+bool URogueCharacterMoverComponent::IsInClimbClipSwitchBlend() const
+{
+	const float ClipSwitchBlendTime = GetClimbClipSwitchBlendTime();
+	return ClipSwitchBlendTime > 0.0f && (LastPreSimTimeMs - ClimbClipSwitchMs) < ClipSwitchBlendTime * 1000.0;
+}
+
+float URogueCharacterMoverComponent::GetLimbIKFollowSpeed() const
+{
+	// Inside a clip-switch window the target and weight follow over the pose's crossfade (~95% in it: FInterpTo's 3 time
+	// constants), so the IK and the pose blend together.
+	return IsInClimbClipSwitchBlend() ? 3.0f / GetClimbClipSwitchBlendTime() : LimbIKFollowSpeed;
+}
+
 const FRogueClimbLimbContact* URogueCharacterMoverComponent::GetLimbContact(const UAnimSequence* Clip, FName LimbId) const
 {
 	if (!Clip)
@@ -1335,7 +1539,7 @@ const FRogueClimbLimbContact* URogueCharacterMoverComponent::GetLimbContact(cons
 	return ContactMeta ? ContactMeta->FindContact(LimbId) : nullptr;
 }
 
-void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin, FName StanceCurveName,
+void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin, int32 Limb, FName StanceCurveName,
 	const UAnimSequence* DominantClip, const FTransform& MeshXform, const FVector& WallNormal, const FVector& PlanePoint,
 	float ProbeRadius, float ProbeReach, float ProbeBackoff, bool bIdle) const
 {
@@ -1348,16 +1552,14 @@ void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin,
 		return;
 	}
 
-	// Weight easing. Normally PredictiveWeightInterpSpeed; for the pose's crossfade time after a blendspace clip switch, a rate
-	// that covers ~95% in that time (FInterpTo: 3 time constants). RELEASE normally drops the weight at once - an authored
+	// Weight easing: the IK follow rate (GetLimbIKFollowSpeed - LimbIKFollowSpeed, or after a blendspace clip switch a rate that
+	// covers ~95% of the pose's crossfade: FInterpTo's 3 time constants). RELEASE normally drops the weight at once - an authored
 	// stance ramp has already brought it to ~0 by then - but right after a switch the NEW clip's curve can drop a limb held
 	// at full weight, so it eases out instead (its Location stays frozen meanwhile - dragged by the reach leash only if the body
 	// would leave it out of reach - so it fades from where it was aimed).
 	const float WeightDt = LastPreSimDeltaSeconds;
-	const float ClipSwitchBlendTime = GetClimbClipSwitchBlendTime();
-	const bool bInClipSwitchBlend = ClipSwitchBlendTime > 0.0f
-		&& (LastPreSimTimeMs - ClimbClipSwitchMs) < ClipSwitchBlendTime * 1000.0;
-	const float WeightSpeed = bInClipSwitchBlend ? 3.0f / ClipSwitchBlendTime : PredictiveWeightInterpSpeed;
+	const bool bInClipSwitchBlend = IsInClimbClipSwitchBlend();
+	const float WeightSpeed = GetLimbIKFollowSpeed();
 	auto Release = [&Pin, bInClipSwitchBlend, WeightDt, WeightSpeed]()
 	{
 		Pin.bPinned = false;
@@ -1416,7 +1618,7 @@ void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin,
 
 		// APPROACH: resolve the baked (root-relative) landing against the LIVE mesh root, then trace onto the real surface.
 		// Re-resolved each frame so the body's forward travel is folded in (no fall-short) - it converges to the true plant.
-		const FClimbHandGrip PlantTarget = ResolvePlantTarget(*Target, MeshXform, WallNormal, PlanePoint, ProbeRadius, ProbeReach, ProbeBackoff);
+		const FClimbHandGrip PlantTarget = ResolvePlantTarget(*Target, Limb, MeshXform, WallNormal, PlanePoint, ProbeRadius, ProbeReach, ProbeBackoff);
 		Pin.Location = PlantTarget.Location;
 		Pin.Normal = PlantTarget.Normal;
 		Pin.bApproaching = true;
@@ -1426,6 +1628,7 @@ void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin,
 		{
 			Pin.bPinned = true;
 			Pin.bApproaching = false;
+			Pin.LeashPlantDistance = -1.0f; // the leash measures the new hold's distance
 			Pin.bHasLastPin = true;
 			Pin.LastPinLocation = Pin.Location;
 			Pin.LastPinNormal = Pin.Normal;
@@ -1449,17 +1652,53 @@ void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin,
 #endif
 }
 
-FClimbHandGrip URogueCharacterMoverComponent::ResolvePlantTarget(const FRogueClimbLimbPlant& Plant, const FTransform& MeshXform,
+FClimbHandGrip URogueCharacterMoverComponent::ResolvePlantTarget(const FRogueClimbLimbPlant& Plant, int32 Limb, const FTransform& MeshXform,
 	const FVector& WallNormal, const FVector& PlanePoint, float ProbeRadius, float ProbeReach, float ProbeBackoff) const
 {
-	const FVector AnchorWorld = MeshXform.TransformPosition(Plant.Landing.GetLocation());
-	FClimbHandGrip Grip = ProbeContactToward(AnchorWorld, WallNormal, PlanePoint, ProbeRadius, ProbeReach, ProbeBackoff);
+	// The baked hold sits where the clip had it on its FLAT wall. Through the surface map it moves onto the real surface
+	// (its flat (u, v) as distances along the surface, the same clearance from it), kept within the leash limit (or the clip's own distance,
+	// if farther) of the limb's root - so a pin lands where the warped swing arrives, and a wide reach on a convex wall lands
+	// at the edge of reach, on the surface.
+	// The confirming trace then runs along the LOCAL normal, so a curved surface doesn't shift the contact sideways.
+	const FVector FlatAnchor = MeshXform.TransformPosition(Plant.Landing.GetLocation());
+	FVector Anchor = FlatAnchor;
+	FVector ProbeNormal = WallNormal;
+	FVector ProbePlanePoint = PlanePoint;
+	const USkeletalMeshComponent* Mesh = CacheOwnerCharacter ? CacheOwnerCharacter->GetMesh() : nullptr;
+	const FName RootBone = GetLimbRootBoneName(Limb);
+	if (bPlacePinsThroughSurfaceMap && IsClimbing() && ClimbSurfaceMap.bValid && Mesh && Mesh->GetBoneIndex(RootBone) != INDEX_NONE)
+	{
+		const FVector Root = Mesh->GetBoneLocation(RootBone);
+		// The reach rule only undoes distance the WARP added: a hold the clip itself placed past the leash limit keeps the
+		// clip's distance (exactly as before the map existed - the leash deals with it once held), so on a flat wall, where
+		// the warp adds nothing, no hold is ever pulled in.
+		const double MaxReach = FMath::Max(static_cast<double>(GetLimbLeashRatioLimit(Mesh, Limb)), FVector::Dist(Root, FlatAnchor));
+		FVector Warped;
+		FQuat Rotation;
+		if (MaxReach > KINDA_SMALL_NUMBER && ClimbSurfaceMap.WarpPointWithinReach(FlatAnchor, Root, MaxReach, Warped, Rotation))
+		{
+			Anchor = Warped;
+			ProbeNormal = Rotation.RotateVector(ClimbSurfaceMap.Normal).GetSafeNormal();
+			ProbePlanePoint = Warped;
+		}
+	}
+
+	FClimbHandGrip Grip = ProbeContactToward(Anchor, ProbeNormal, ProbePlanePoint, ProbeRadius, ProbeReach, ProbeBackoff);
 	if (!Grip.bFound)
 	{
-		// Miss (over a void): aim at the predicted anchor itself.
-		Grip.Location = AnchorWorld;
-		Grip.Normal = WallNormal;
+		// Miss (over a void): aim at the (warped) anchor itself.
+		Grip.Location = Anchor;
+		Grip.Normal = ProbeNormal;
 	}
+
+#if ENABLE_DRAW_DEBUG
+	// PURPLE = the surface-map warp of this hold: the clip's flat-wall spot -> where it was moved before the trace.
+	if (CVarClimbingDebugSurfaceMap.GetValueOnGameThread() && GetWorld() && !Anchor.Equals(FlatAnchor, 0.5))
+	{
+		DrawDebugLine(GetWorld(), FlatAnchor, Anchor, FColor(170, 80, 255), false, -1.0f, 0, 1.0f);
+		DrawDebugPoint(GetWorld(), FlatAnchor, 5.0f, FColor(170, 80, 255), false, -1.0f, 0);
+	}
+#endif
 	return Grip;
 }
 
@@ -1536,7 +1775,7 @@ void URogueCharacterMoverComponent::BuildIdleRetreatPlan(const UAnimSequence* Id
 		}
 
 		const bool bFoot = Limb == RogueClimbLimb::LeftFoot || Limb == RogueClimbLimb::RightFoot;
-		const FClimbHandGrip IdleGrip = ResolvePlantTarget(*Plant, MeshXform, WallNormal, PlanePoint,
+		const FClimbHandGrip IdleGrip = ResolvePlantTarget(*Plant, Limb, MeshXform, WallNormal, PlanePoint,
 			bFoot ? FootProbeRadius : HandProbeRadius, bFoot ? FootProbeReach : HandProbeReach, bFoot ? FootProbeBackoff : HandProbeBackoff);
 		IdleGripLocation[Limb] = IdleGrip.Location;
 
@@ -1666,6 +1905,30 @@ bool URogueCharacterMoverComponent::LeashLimbTargetsWithinReach(const USkeletalM
 		return false;
 	}
 
+	// THE CLIP'S LINE: the climb push on the wall. It's the blendspace input, so it's the direction the playing (blended) clip
+	// moves the body and strikes every limb along - a left clip: all left; a left-up clip: 45 degrees up. A held limb is
+	// dragged along this line, not along the live body travel, which is near zero and noisy exactly when the clip's torso
+	// motion is what pulls a limb out of reach. Zero at idle, and in a corner turn (its clip isn't the blendspace).
+	FVector ClipLine = FVector::ZeroVector;
+	if (bPredictive && GetClimbMoveSpeedFraction() > FootPlantIdleInputDeadzone)
+	{
+		const FVector WallNormal = GetClimbDominantSurfaceNormal().GetSafeNormal();
+		if (!WallNormal.IsZero())
+		{
+			ClipLine = FVector::VectorPlaneProject(GetMovementIntent(), WallNormal).GetSafeNormal();
+		}
+	}
+
+	// The surface map follows a curved face (the plane at a pin doesn't): only while climbing, on this tick's map.
+	const bool bMapUsable = bPredictive && IsClimbing() && ClimbSurfaceMap.bValid;
+	// The clip's line in the map's (s, t): the same everywhere on the map - its axes are the flat frame's, carried along the
+	// surface - so a sideways line stays sideways round a cylinder.
+	const FVector2D ClipLineUV(FVector::DotProduct(ClipLine, ClimbSurfaceMap.Right), FVector::DotProduct(ClipLine, ClimbSurfaceMap.Up));
+	// A pin counts as ON the map when the map's surface there faces the same way (within ~35 degrees) and sits within a lip's
+	// height of it - a pin on another face (an inner corner's second wall) is left to the plane.
+	constexpr double MapMinNormalDot = 0.8;
+	constexpr double MapMaxGap = 15.0;
+
 	static const TCHAR* LimbNames[RogueClimbLimb::Count] = { TEXT("LF"), TEXT("RF"), TEXT("LH"), TEXT("RH") };
 	bool bDraggedPinned = false;
 	for (int32 Limb = 0; Limb < RogueClimbLimb::Count; ++Limb)
@@ -1675,7 +1938,7 @@ bool URogueCharacterMoverComponent::LeashLimbTargetsWithinReach(const USkeletalM
 		// HELD targets only: a pinned one, or one still fading out on its frozen grip (a clip switch eases a released limb's
 		// weight out). Not one approaching a plant (the resolver re-resolves it from the live body every tick) or travelling a
 		// re-grip arc (it lands on a fresh grip).
-		if (Pin.bRegripSwing || (!Pin.bPinned && (Pin.bApproaching || Pin.Weight <= KINDA_SMALL_NUMBER)))
+		if (!IsLimbHeldForLeash(Pin))
 		{
 			continue;
 		}
@@ -1691,53 +1954,161 @@ bool URogueCharacterMoverComponent::LeashLimbTargetsWithinReach(const USkeletalM
 		// to the IK target (the pin pushed out by the lip standoff - what the rig aims the contact tip at).
 		const FVector Root = Mesh->GetBoneLocation(RootBone);
 		const FVector Target = Pin.Location + N * LimbPinSurfaceOffset;
-		const float Limit = LimbReachLeashRatio * Reach;
-		if (FVector::DistSquared(Root, Target) <= FMath::Square(Limit))
+		const float Distance = static_cast<float>(FVector::Dist(Root, Target));
+
+		// THIS HOLD's limit: LimbReachLeashRatio x the reach - or, for a hold the clip itself placed farther (an overhead reach
+		// planted at 99%), its distance when first held, up to the full reach. So the leash only undoes distance the body adds
+		// AFTER the plant; it never drags a hold off the spot the clip put it.
+		if (Pin.LeashPlantDistance < 0.0f)
+		{
+			Pin.LeashPlantDistance = Distance;
+		}
+		const float RatioLimit = GetLimbLeashRatioLimit(Mesh, Limb);
+		const float Limit = GetLimbLeashLimit(Mesh, Limb);
+		if (Distance <= Limit)
 		{
 			continue; // within reach - untouched
 		}
 
-		// The reachable part of the target's plane is a disc: centred on the root's projection, radius sqrt(Limit^2 - H^2)
-		// with H = the root's distance from the plane. Drag the target to the disc's nearest point - along the face, the
-		// shortest way back into reach, by exactly the excess - then re-trace onto the real surface there: a bumpy face is
-		// followed, and past a wall's edge (or into a corner) there's no same-face surface, so a limb is never dragged off it.
-		const float H = static_cast<float>(FVector::DotProduct(Root - Target, N));
+		// WHERE TO DRAG IT, by just the excess - the first that works:
+		//  a) ALONG THE CLIP'S LINE, whichever way is shorter: a sideways climb drags a held limb sideways (it keeps its height),
+		//     a diagonal one along its 45 degrees.
+		//  b) The NEAREST spot back in reach: idle (no clip line), or no move along the line gets it back.
+		// On the SURFACE MAP when the pin is on it - a curve is followed: round a cylinder, sideways toward the body closes the
+		// distance far faster than on the flat plane at the pin - else on that plane. Then re-trace onto the real surface there:
+		// a bumpy face is followed, and past a wall's edge (or into a corner) there's no same-face surface, so a limb is never
+		// dragged off it.
 		bool bDragged = false;
-		if (FMath::Abs(H) < Limit)
+		bool bHasDragTo = false;
+		bool bAlongClip = false;
+		bool bOnMap = false;
+		FVector Surface = FVector::ZeroVector;  // the drag destination on the face (the lip standoff taken back off)
+		FVector SurfaceNormal = N;              // the face's normal there - the re-trace runs along it
+
+		FVector2D PinUV = FVector2D::ZeroVector;
+		FVector MapBias = FVector::ZeroVector;
+		// The pin is ON the real surface, so its (s, t) is found on the map (Locate), not by flattening it onto the plane - round
+		// a curve the two differ.
+		if (bMapUsable && ClimbSurfaceMap.Locate(Pin.Location, PinUV))
 		{
-			const FVector Centre = Root - N * H;
-			const FVector FromCentre = Target - Centre;
-			const float FromCentreLength = static_cast<float>(FromCentre.Size());
-			const float Radius = FMath::Sqrt(FMath::Square(Limit) - FMath::Square(H));
-			if (FromCentreLength > KINDA_SMALL_NUMBER)
+			FVector MapTarget;
+			FQuat MapRotation;
+			if (ClimbSurfaceMap.WarpPointAt(PinUV, LimbPinSurfaceOffset, MapTarget, MapRotation))
 			{
-				const FVector Surface = Centre + FromCentre * (FMath::Min(Radius, FromCentreLength) / FromCentreLength) - N * LimbPinSurfaceOffset;
-				const bool bFoot = Limb == RogueClimbLimb::LeftFoot || Limb == RogueClimbLimb::RightFoot;
-				const FClimbHandGrip OnFace = ProbeContactToward(Surface, N, Surface, bFoot ? FootProbeRadius : HandProbeRadius,
-					bFoot ? FootProbeReach : HandProbeReach, bFoot ? FootProbeBackoff : HandProbeBackoff);
-				if (OnFace.bFound)
+				const FVector MapNormal = MapRotation.RotateVector(ClimbSurfaceMap.Normal);
+				const FVector MapSurface = MapTarget - MapNormal * LimbPinSurfaceOffset;
+				bOnMap = FVector::DotProduct(MapNormal, N) > MapMinNormalDot
+					&& FVector::DistSquared(MapSurface, Pin.Location) <= FMath::Square(MapMaxGap);
+				MapBias = Target - MapTarget;
+			}
+		}
+		if (bOnMap)
+		{
+			// The map's own error at the pin (a lip smaller than a cell) is carried along: the search measures the root against
+			// the map's targets shifted by it - i.e. against the REAL target at the pin.
+			const FVector MapRoot = Root - MapBias;
+			FVector2D DragUV;
+			if (!ClipLine.IsZero()
+				&& ClimbSurfaceMap.FindAlongLineInReach(PinUV, ClipLineUV, LimbPinSurfaceOffset, MapRoot, Limit, Reach, DragUV))
+			{
+				bHasDragTo = true;
+				bAlongClip = true;
+			}
+			else if (ClimbSurfaceMap.FindNearestInReach(PinUV, LimbPinSurfaceOffset, MapRoot, Limit, Reach, DragUV))
+			{
+				bHasDragTo = true;
+			}
+			FVector MapTarget;
+			FQuat MapRotation;
+			if (bHasDragTo && ClimbSurfaceMap.WarpPointAt(DragUV, LimbPinSurfaceOffset, MapTarget, MapRotation))
+			{
+				SurfaceNormal = MapRotation.RotateVector(ClimbSurfaceMap.Normal).GetSafeNormal();
+				Surface = MapTarget + MapBias - SurfaceNormal * LimbPinSurfaceOffset;
+			}
+			else
+			{
+				bHasDragTo = false;
+			}
+		}
+		else
+		{
+			// On the face's plane at the pin. a) the clip's line on that plane: |Target + D s - Root| = Limit -> s^2 + 2 B s + C = 0
+			// (B = (Target - Root).D, C = the excess > 0, so both roots share a sign) - take the root nearer zero. b) the
+			// reachable disc's nearest point: centred on the root's projection, radius sqrt(Limit^2 - H^2).
+			const float H = static_cast<float>(FVector::DotProduct(Root - Target, N));
+			const FVector D = FVector::VectorPlaneProject(ClipLine, N).GetSafeNormal();
+			if (!D.IsZero())
+			{
+				const FVector RootToTarget = Target - Root;
+				const double B = FVector::DotProduct(RootToTarget, D);
+				const double C = RootToTarget.SizeSquared() - FMath::Square(static_cast<double>(Limit));
+				const double Discriminant = B * B - C;
+				if (Discriminant >= 0.0)
 				{
-					// The spring state moves with the pin: the leash is a continuous constraint, not a jump to absorb - easing it
-					// would lag the shown limb behind the dragged target, back out of reach.
-					const FVector Delta = (OnFace.Location + OnFace.Normal * LimbPinSurfaceOffset) - Target;
-					Pin.Location = OnFace.Location;
-					Pin.Normal = OnFace.Normal;
-					Pin.SpringSmoothedWorld += Delta;
-					Pin.SpringPrevTarget += Delta;
-					if (Pin.bPinned)
-					{
-						Pin.LastPinLocation = Pin.Location;
-						Pin.LastPinNormal = Pin.Normal;
-						bDraggedPinned = true;
-					}
-					bDragged = true;
+					const double S = (B < 0.0) ? (-B - FMath::Sqrt(Discriminant)) : (-B + FMath::Sqrt(Discriminant));
+					Surface = Target + D * S - N * LimbPinSurfaceOffset;
+					bHasDragTo = true;
+					bAlongClip = true;
+				}
+			}
+			if (!bHasDragTo && FMath::Abs(H) < Limit)
+			{
+				const FVector Centre = Root - N * H;
+				const FVector FromCentre = Target - Centre;
+				const float FromCentreLength = static_cast<float>(FromCentre.Size());
+				const float Radius = FMath::Sqrt(FMath::Square(Limit) - FMath::Square(H));
+				if (FromCentreLength > KINDA_SMALL_NUMBER)
+				{
+					Surface = Centre + FromCentre * (FMath::Min(Radius, FromCentreLength) / FromCentreLength) - N * LimbPinSurfaceOffset;
+					bHasDragTo = true;
+				}
+			}
+		}
+		if (bHasDragTo)
+		{
+			const bool bFoot = Limb == RogueClimbLimb::LeftFoot || Limb == RogueClimbLimb::RightFoot;
+			const FClimbHandGrip OnFace = ProbeContactToward(Surface, SurfaceNormal, Surface, bFoot ? FootProbeRadius : HandProbeRadius,
+				bFoot ? FootProbeReach : HandProbeReach, bFoot ? FootProbeBackoff : HandProbeBackoff);
+			if (OnFace.bFound)
+			{
+				// The followed target moves with the pin: the leash is a continuous constraint, not a jump to absorb - easing
+				// it would lag the shown limb behind the dragged target, back out of reach.
+				const FVector Delta = (OnFace.Location + OnFace.Normal * LimbPinSurfaceOffset) - Target;
+				Pin.Location = OnFace.Location;
+				Pin.Normal = OnFace.Normal;
+				Pin.FollowWorld += Delta;
+				if (Pin.bPinned)
+				{
+					Pin.LastPinLocation = Pin.Location;
+					Pin.LastPinNormal = Pin.Normal;
+					bDraggedPinned = true;
+				}
+				bDragged = true;
 #if ENABLE_DRAW_DEBUG
-					// MAGENTA = the leash, taut (limb root -> the dragged target) while it drags the limb.
-					if (CVarClimbingDebugDrawing.GetValueOnGameThread() && GetWorld())
+				// The leash, taut (limb root -> the dragged target) while it drags the limb: MAGENTA = along the clip's line,
+				// ORANGE = to the nearest spot in reach. CYAN = the clip's line at the pin.
+				if (CVarClimbingDebugDrawing.GetValueOnGameThread() && GetWorld())
+				{
+					DrawDebugLine(GetWorld(), Root, Target + Delta, bAlongClip ? FColor::Magenta : FColor::Orange, false, -1.0f, 0, 1.0f);
+					const FVector ClipOnFace = FVector::VectorPlaneProject(ClipLine, N).GetSafeNormal();
+					if (!ClipOnFace.IsZero())
 					{
-						DrawDebugLine(GetWorld(), Root, Target + Delta, FColor::Magenta, false, -1.0f, 0, 1.0f);
+						DrawDebugDirectionalArrow(GetWorld(), Target, Target + ClipOnFace * 15.0f, 4.0f, FColor::Cyan, false, -1.0f, 0, 0.5f);
 					}
+				}
 #endif
+				if (CVarClimbingDebugLeash.GetValueOnGameThread())
+				{
+					const FVector Up = GetUpDirection();
+					const FVector2D Intent = ComputeRoundClimbWallIntent(*this).GetSafeNormal(); // X = up, Y = right
+					const TCHAR* Why = bAlongClip ? TEXT("")
+						: (ClipLine.IsZero() ? TEXT(" | nearest because: idle, no clip line")
+							: TEXT(" | nearest because: no move along the clip line gets back in reach"));
+					UE_LOG(LogTemp, Log, TEXT("[ClimbLeash] %s %s on the %s: drag %.1f cm (vertical %+.1f) | root->target %.1f > limit %.1f (%s) | target %+.1f cm above root | clip line up %+.2f right %+.2f%s"),
+						LimbNames[Limb], bAlongClip ? TEXT("ALONG CLIP LINE") : TEXT("NEAREST"), bOnMap ? TEXT("map") : TEXT("plane"),
+						Delta.Size(), FVector::DotProduct(Delta, Up), Distance, Limit,
+						Limit > RatioLimit ? TEXT("its plant distance") : TEXT("leash ratio"),
+						FVector::DotProduct(Target - Root, Up), Intent.X, Intent.Y, Why);
 				}
 			}
 		}
@@ -1805,7 +2176,7 @@ void URogueCharacterMoverComponent::RegripLockedLimbsOnClipSwitch(const UAnimSeq
 		}
 
 		const bool bFoot = Limb == RogueClimbLimb::LeftFoot || Limb == RogueClimbLimb::RightFoot;
-		const FClimbHandGrip NewGrip = ResolvePlantTarget(*Plant, MeshXform, WallNormal, PlanePoint,
+		const FClimbHandGrip NewGrip = ResolvePlantTarget(*Plant, Limb, MeshXform, WallNormal, PlanePoint,
 			bFoot ? FootProbeRadius : HandProbeRadius, bFoot ? FootProbeReach : HandProbeReach, bFoot ? FootProbeBackoff : HandProbeBackoff);
 		const float Distance = static_cast<float>(FVector::Dist(NewGrip.Location, Pin.Location));
 		if (Distance <= LimbRegripMinDistance)
@@ -1833,7 +2204,7 @@ void URogueCharacterMoverComponent::BeginRegripSwing(FClimbLimbPin& Pin) const
 	// Start of the swing arc: the IK target as last SHOWN (after the reach cap - so a limb released because it was out of
 	// reach starts from where it really was, not from the unreachable grip) and that grip's normal (the lift-off direction).
 	// The end, duration and lift are sized on the swing's first tick, once the resolver has re-locked the target this tick.
-	Pin.RegripSwingFrom = Pin.DisplayedWorld.IsZero() ? Pin.SpringSmoothedWorld : Pin.DisplayedWorld;
+	Pin.RegripSwingFrom = Pin.DisplayedWorld.IsZero() ? Pin.FollowWorld : Pin.DisplayedWorld;
 	Pin.RegripSwingFromNormal = Pin.Normal;
 	Pin.RegripSwingStartMs = LastPreSimTimeMs;
 	Pin.RegripSwingDuration = 0.0f;
@@ -1936,22 +2307,63 @@ FName URogueCharacterMoverComponent::GetLimbReachTipName(int32 Limb) const
 	}
 }
 
-float URogueCharacterMoverComponent::GetLimbReachLength(const USkeletalMeshComponent* Mesh, int32 Limb)
+void URogueCharacterMoverComponent::RefreshLimbReachCache(const USkeletalMesh* Asset) const
+{
+	if (!Asset || LimbReachLengthCacheMesh.Get() == Asset)
+	{
+		return;
+	}
+	LimbReachLengthCacheMesh = Asset;
+	for (int32 Index = 0; Index < RogueClimbLimb::Count; ++Index)
+	{
+		LimbReachLengthCache[Index] = ComputeLimbChainLength(*Asset, GetLimbRootBoneName(Index), GetLimbReachTipName(Index));
+		ComputeLimbContact(*Asset, GetLimbReachTipName(Index), LimbContactBoneCache[Index], LimbContactOffsetCache[Index]);
+	}
+}
+
+float URogueCharacterMoverComponent::GetLimbReachLength(const USkeletalMeshComponent* Mesh, int32 Limb) const
 {
 	const USkeletalMesh* Asset = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
 	if (!Asset)
 	{
 		return 0.0f;
 	}
-	if (LimbReachLengthCacheMesh.Get() != Asset)
-	{
-		LimbReachLengthCacheMesh = Asset;
-		for (int32 Index = 0; Index < RogueClimbLimb::Count; ++Index)
-		{
-			LimbReachLengthCache[Index] = ComputeLimbChainLength(*Asset, GetLimbRootBoneName(Index), GetLimbReachTipName(Index));
-		}
-	}
+	RefreshLimbReachCache(Asset);
 	return LimbReachLengthCache[Limb] * static_cast<float>(Mesh->GetComponentScale().X);
+}
+
+void URogueCharacterMoverComponent::GetLimbContact(const USkeletalMeshComponent* Mesh, int32 Limb, FName& OutBone, FVector& OutOffset) const
+{
+	OutBone = NAME_None;
+	OutOffset = FVector::ZeroVector;
+	const USkeletalMesh* Asset = Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr;
+	if (!Asset)
+	{
+		return;
+	}
+	RefreshLimbReachCache(Asset);
+	OutBone = LimbContactBoneCache[Limb];
+	OutOffset = LimbContactOffsetCache[Limb];
+}
+
+bool URogueCharacterMoverComponent::IsLimbHeldForLeash(const FClimbLimbPin& Pin)
+{
+	return !Pin.bRegripSwing && (Pin.bPinned || (!Pin.bApproaching && Pin.Weight > KINDA_SMALL_NUMBER));
+}
+
+float URogueCharacterMoverComponent::GetLimbLeashRatioLimit(const USkeletalMeshComponent* Mesh, int32 Limb) const
+{
+	return LimbReachLeashRatio * GetLimbReachLength(Mesh, Limb);
+}
+
+float URogueCharacterMoverComponent::GetLimbLeashLimit(const USkeletalMeshComponent* Mesh, int32 Limb) const
+{
+	const float Reach = GetLimbReachLength(Mesh, Limb);
+	const float RatioLimit = LimbReachLeashRatio * Reach;
+	const FClimbLimbPin& Pin = GetLimbPin(Limb);
+	return (IsLimbHeldForLeash(Pin) && Pin.LeashPlantDistance >= 0.0f)
+		? FMath::Clamp(Pin.LeashPlantDistance, RatioLimit, Reach)
+		: RatioLimit;
 }
 
 bool URogueCharacterMoverComponent::IsLimbUnloaded(int32 Limb) const

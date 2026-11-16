@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="430" viewBox="0 0 940 430" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+<title>Surface warp formula: the clip's hand P at flat (u, v, h) moves to the surface point S found u cm along the surface, then out along its normal n by h</title>
+<defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6"/></marker></defs>
+<rect x="0.5" y="0.5" width="939" height="429" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+<text x="24.0" y="32.0" fill="#1f2328" font-size="15" font-weight="600" text-anchor="start">One point: the clip's hand P becomes the warped hand (top view)</text>
+<clipPath id="c1"><rect x="10.0" y="44.0" width="560.0" height="372.0"/></clipPath>
+<circle cx="150.0" cy="458.0" r="300.0" fill="#f0f3f6" stroke="#d0d7de" stroke-width="1.0" clip-path="url(#c1)"/>
+<text x="160.0" y="395.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">live surface: a cylinder, radius 75 cm</text>
+<line x1="35.0" y1="150.0" x2="560.0" y2="150.0" stroke="#57606a" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="7 5"/>
+<text x="28.0" y="126.0" fill="#57606a" font-size="12" font-weight="600" text-anchor="start">flat wall</text>
+<text x="28.0" y="141.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">(the clips' wall)</text>
+<line x1="150.0" y1="150.0" x2="220.0" y2="150.0" stroke="#1f2328" stroke-width="1.6" stroke-linecap="round" marker-end="url(#arr)"/>
+<text x="226.0" y="158.0" fill="#1f2328" font-size="12" font-weight="600" text-anchor="start">Right</text>
+<line x1="150.0" y1="150.0" x2="150.0" y2="78.0" stroke="#1f2328" stroke-width="1.6" stroke-linecap="round" marker-end="url(#arr)"/>
+<text x="156.0" y="74.0" fill="#1f2328" font-size="12" font-weight="600" text-anchor="start">N</text>
+<circle cx="150.0" cy="150.0" r="7" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+<circle cx="150.0" cy="150.0" r="2.2" fill="#1f2328"/>
+<text x="138.0" y="174.0" fill="#1f2328" font-size="13" font-weight="600" text-anchor="end">Origin</text>
+<text x="138.0" y="190.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="end">Up: out of the page</text>
+<line x1="160.0" y1="144.0" x2="348.0" y2="144.0" stroke="#57606a" stroke-width="1.0" stroke-linecap="round" marker-end="url(#arr)"/>
+<text x="250.0" y="138.0" fill="#1f2328" font-size="14" font-weight="700" text-anchor="middle" font-style="italic">u</text>
+<line x1="350.0" y1="150.0" x2="350.0" y2="98.0" stroke="#d1543a" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="5 3"/>
+<text x="342.0" y="128.0" fill="#d1543a" font-size="14" font-weight="700" text-anchor="end" font-style="italic">h</text>
+<path d="M150.0 158.0 L155.0 158.0 L160.0 158.2 L165.0 158.4 L170.0 158.7 L175.0 159.0 L180.0 159.5 L184.9 160.0 L189.9 160.7 L194.8 161.4 L199.8 162.2 L204.7 163.0 L209.6 164.0 L214.5 165.0 L219.4 166.1 L224.2 167.3 L229.1 168.6 L233.9 170.0 L238.7 171.4 L243.4 172.9 L248.2 174.5 L252.9 176.2 L257.6 177.9 L262.2 179.8 L266.8 181.7 L271.4 183.7 L276.0 185.7 L280.5 187.9 L285.0 190.1 L289.4 192.4 L293.8 194.7 L298.2 197.2 L302.5 199.7 L306.8 202.2 L311.0 204.9 L315.2 207.6 L319.4 210.4 L323.5 213.3 L327.6 216.2 L331.6 219.2 L335.5 222.2" fill="none" stroke="#d9822b" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="232.0" y="206.0" fill="#d9822b" font-size="13" font-weight="700" text-anchor="middle">u, along the surface</text>
+<line x1="335.5" y1="222.2" x2="403.5" y2="135.8" stroke="#8250df" stroke-width="1.4" stroke-linecap="round" marker-end="url(#arr)"/>
+<text x="409.5" y="139.8" fill="#8250df" font-size="14" font-weight="700" text-anchor="start" font-style="italic">n</text>
+<line x1="335.5" y1="222.2" x2="367.7" y2="181.4" stroke="#0f9d8a" stroke-width="3.2" stroke-linecap="round"/>
+<text x="361.6" y="213.8" fill="#0f9d8a" font-size="14" font-weight="700" text-anchor="start" font-style="italic">h</text>
+<line x1="350.0" y1="98.0" x2="365.7" y2="176.4" stroke="#57606a" stroke-width="1.0" stroke-linecap="round" stroke-dasharray="2 3" marker-end="url(#arr)"/>
+<circle cx="350.0" cy="150.0" r="3.5" fill="#57606a"/>
+<circle cx="150.0" cy="158.0" r="3.5" fill="#d9822b"/>
+<circle cx="335.5" cy="222.2" r="5" fill="#d9822b"/>
+<circle cx="350.0" cy="98.0" r="6" fill="#ffffff" stroke="#d1543a" stroke-width="1.6"/>
+<circle cx="367.7" cy="181.4" r="6.5" fill="#0f9d8a"/>
+<text x="362.0" y="94.0" fill="#d1543a" font-size="13" font-weight="600" text-anchor="start">P: the clip's hand</text>
+<text x="323.5" y="244.2" fill="#d9822b" font-size="13" font-weight="600" text-anchor="end">S(u, v): u cm along the surface</text>
+<text x="379.7" y="185.4" fill="#0f9d8a" font-size="13" font-weight="600" text-anchor="start">warped</text>
+<line x1="578.0" y1="52.0" x2="578.0" y2="400.0" stroke="#d0d7de" stroke-width="1.2" stroke-linecap="round"/>
+<text x="600.0" y="70.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">The clip's hand, in the flat wall frame</text>
+<text x="600.0" y="94.0" fill="#1f2328" font-size="15" font-weight="600" text-anchor="start">P = Origin + u·Right + v·Up + h·N</text>
+<text x="600.0" y="134.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">(u, v) become distances along the surface</text>
+<text x="600.0" y="158.0" font-size="15" text-anchor="start" xml:space="preserve"><tspan fill="#1f2328" font-weight="600">warped = </tspan><tspan fill="#d9822b" font-weight="700">S(u, v)</tspan><tspan fill="#1f2328" font-weight="600"> + </tspan><tspan fill="#0f9d8a" font-weight="700">h·n(u, v)</tspan></text>
+<text x="600.0" y="182.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">rotation: the minimal turn N → n</text>
+<text x="600.0" y="226.0" fill="#1f2328" font-size="14" font-weight="700" text-anchor="start" font-style="italic">u, v</text>
+<text x="672.0" y="226.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">P along the flat wall (the clip)</text>
+<text x="600.0" y="252.0" fill="#d1543a" font-size="14" font-weight="700" text-anchor="start" font-style="italic">h</text>
+<text x="672.0" y="252.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">P off the flat wall (the clip)</text>
+<text x="600.0" y="278.0" fill="#d9822b" font-size="14" font-weight="700" text-anchor="start" font-style="italic">S(u, v)</text>
+<text x="672.0" y="278.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">map point (u, v) along the surface</text>
+<text x="600.0" y="304.0" fill="#8250df" font-size="14" font-weight="700" text-anchor="start" font-style="italic">n(u, v)</text>
+<text x="672.0" y="304.0" fill="#57606a" font-size="12" font-weight="400" text-anchor="start">map normal there</text>
+<text x="600.0" y="350.0" fill="#1f2328" font-size="12" font-weight="400" text-anchor="start">Same distances and clearance, measured on</text>
+<text x="600.0" y="366.0" fill="#1f2328" font-size="12" font-weight="400" text-anchor="start">the live surface. Flat wall on the plane:</text>
+<text x="600.0" y="382.0" fill="#1f2328" font-size="12" font-weight="400" text-anchor="start">S = Origin + u·Right + v·Up, n = N, so</text>
+<text x="600.0" y="398.0" fill="#1f2328" font-size="12" font-weight="400" text-anchor="start">warped = P.</text>
+</svg>

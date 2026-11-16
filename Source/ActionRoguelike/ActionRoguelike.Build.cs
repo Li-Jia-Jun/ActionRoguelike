@@ -14,6 +14,9 @@ public class ActionRoguelike : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "EnhancedInput", "Niagara", "DeveloperSettings"});
 
+		// Climb limb IK: the custom Control Rig unit (FRigUnit_RogueClimbLimbIK) and the engine's two-bone solve it builds on.
+		PrivateDependencyModuleNames.AddRange(new string[] { "ControlRig", "RigVM", "AnimationCore" });
+
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
 		

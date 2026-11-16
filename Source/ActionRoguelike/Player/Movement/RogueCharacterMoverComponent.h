@@ -5,6 +5,8 @@
 #include "DefaultMovementSet/CharacterMoverComponent.h"
 #include "GameplayTagContainer.h"
 #include "ActionSystem/GameplayEvent/FRogueGameplayEventData.h"
+#include "RogueLimbSwivelSolver.h"
+#include "RogueClimbSurfaceMap.h"
 #include "RogueCharacterMoverComponent.generated.h"
 
 class UAnimMontage;
@@ -105,22 +107,25 @@ struct FClimbLimbPin
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK")
 	FVector LocalNormal = FVector::ZeroVector;
 
+	// Control Rig (the Climb Surface Warp node's Reach pin): this limb's reach limit + contact point - the component's one
+	// definition, so the warp's reach rule matches the leash and the pins exactly. Refreshed every tick.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK")
+	FClimbLimbReach Reach;
+
 	// --- internal latch (persists across ticks; NOT exposed - Weight > 0 is the public "is pinned") ---
 	bool bPinned = false;                             // currently holding a world-locked pin (the one-way ratchet)
 	bool bHasLastPin = false;                         // a pin has been established at least once (arm fallback grace-holds it)
 	FVector LastPinLocation = FVector::ZeroVector;
 	FVector LastPinNormal = FVector::ZeroVector;
+	float LeashPlantDistance = -1.0f;                 // root -> IK target when this hold was first held (the reach leash's own limit for it, see LeashLimbTargetsWithinReach); < 0 = not measured yet - every lock resets it
 
-	// --- IK-target spring latch (persists across ticks; smooths the WORLD target so an acquire/relocate eases in instead of
-	// popping). A FVectorSpringState mirrored as bare fields so this header needn't pull in KismetMathLibrary. ---
-	FVector SpringSmoothedWorld = FVector::ZeroVector; // last sprung Control-Rig target (world, incl. the surface offset)
-	FVector SpringPrevTarget = FVector::ZeroVector;
-	FVector SpringVelocity = FVector::ZeroVector;
-	bool bSpringValid = false;
+	// --- IK-target FOLLOW (persists across ticks; LimbIKFollowSpeed): the target handed to the rig chases the raw target, so
+	// an acquire / relocation eases in instead of popping. Followed in the body's frame while approaching, in world while held. ---
+	FVector FollowWorld = FVector::ZeroVector; // last followed Control-Rig target (world, incl. the surface offset)
+	bool bFollowValid = false;                 // shown last tick (weight > 0); false = the next shown tick starts AT its target
 
 	// --- predictive-IK latch (persists across ticks; used only by the predictive path) ---
 	int32 PredictSelectedPlant = 0;    // the baked plant index currently approached/locked (phase-picked; for debug/clarity)
-	bool bClipSwitchEase = false;      // the blendspace's dominant clip changed under this limb: its target eases past the teleport guard until it arrives
 	bool bApproaching = false;         // unpinned and aiming at a plant the resolver re-resolves every tick (the reach leash leaves it alone)
 	FVector DisplayedWorld = FVector::ZeroVector; // the world IK target actually handed to the rig last tick (after the reach cap) - a re-grip swing starts here
 	bool bClipSwitchRegripped = false; // already re-gripped on a clip switch this plant - cleared when the clip next swings it (stops a flickering switch hopping it)
@@ -433,6 +438,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
 	FClimbCornerProbeResult GetClimbCorner(bool bRight) const { return bRight ? RightCorner : LeftCorner; }
 
+	// The marched surface map of the wall around the climber (world space), rebuilt each pre-sim tick while climbing; bValid false
+	// otherwise. See FClimbSurfaceMap / Docs/climb/surface-warp.md.
+	const FClimbSurfaceMap& GetClimbSurfaceMap() const { return ClimbSurfaceMap; }
+
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing|Corner")
 	bool IsCornerTurnAvailable(bool bRight) const { return bRight ? RightCorner.bAvailable : LeftCorner.bAvailable; }
 
@@ -533,13 +542,15 @@ protected:
 	// surface - re-resolved each frame through the approach (so the body's forward travel is folded in, no fall-short) then
 	// WORLD-LOCKED at full contact (W >= PredictiveLockStanceValue). The plant (big/small strike) is picked by the live
 	// ClimbPhase curve; W is the destination clip's own stance curve at that phase. Weight = W, smoothed.
-	void ResolveLimbPinPredictive(FClimbLimbPin& Pin, FName StanceCurveName, const UAnimSequence* DominantClip,
+	void ResolveLimbPinPredictive(FClimbLimbPin& Pin, int32 Limb, FName StanceCurveName, const UAnimSequence* DominantClip,
 		const FTransform& MeshXform, const FVector& WallNormal, const FVector& PlanePoint,
 		float ProbeRadius, float ProbeReach, float ProbeBackoff, bool bIdle) const;
 
 	// The world spot a predictive limb aims at for a baked plant: its root-relative landing resolved against the live mesh
-	// (MeshXform), traced onto the surface along -WallNormal. A miss (over a void) aims at the predicted anchor itself.
-	FClimbHandGrip ResolvePlantTarget(const FRogueClimbLimbPlant& Plant, const FTransform& MeshXform, const FVector& WallNormal,
+	// (MeshXform), then - with the surface map on (bPlacePinsThroughSurfaceMap) - warped onto the real surface and kept within
+	// the limb's leash reach, and finally traced onto the surface (along the local normal there, else -WallNormal). A miss
+	// (over a void) aims at the anchor itself.
+	FClimbHandGrip ResolvePlantTarget(const FRogueClimbLimbPlant& Plant, int32 Limb, const FTransform& MeshXform, const FVector& WallNormal,
 		const FVector& PlanePoint, float ProbeRadius, float ProbeReach, float ProbeBackoff) const;
 
 	// Idle-retreat SEQUENCER. BuildIdleRetreatPlan runs ONCE at committed idle: measures each gripping limb's distance to its
@@ -564,6 +575,13 @@ protected:
 	bool IsLimbUnloaded(int32 Limb) const;
 	void RefreshClimbWeightShift(const USkeletalMeshComponent* Mesh);
 
+	// Publishes ClimbLimbIKPlanes (end of RefreshLimbPins): the wall face(s) the limb IK keeps knees/elbows clear of.
+	void RefreshLimbIKPlanes(const USkeletalMeshComponent* Mesh);
+
+	// Rebuilds ClimbSurfaceMap (pre-sim, right after RefreshClimbSurfaceInfo has the dominant plane): marched over the
+	// surface from one start cell (FClimbSurfaceMap::Build). Draws it under game.climbing.DebugSurfaceMap.
+	void RefreshClimbSurfaceMap();
+
 	// Limb lookups by RogueClimbLimb id (the sequencer's limb handle).
 	FClimbLimbPin& GetLimbPin(int32 Limb);
 	const FClimbLimbPin& GetLimbPin(int32 Limb) const;
@@ -576,10 +594,13 @@ protected:
 	void BeginRegripSwing(FClimbLimbPin& Pin) const;
 
 	// REACH LEASH (bLimbReachLeash), every climbing context, before the resolvers: a pinned target - or one still fading out
-	// on its frozen grip - never sits farther than LimbReachLeashRatio x its limb's reach from the limb's root; past that it's
-	// pulled back along its face by exactly the excess, re-traced onto the real surface (the spring state moves with it, so
-	// the shown limb doesn't lag). A pinned limb it can't keep on its face within reach: bPredictive (the climb) -> re-grips
-	// on the arc onto this tick's plant; the corner turn -> holds (its stance ends it). Returns true when it dragged a PINNED target.
+	// on its frozen grip - never sits farther from the limb's root than its limit: LimbReachLeashRatio x its limb's reach, or
+	// its distance when first held if the clip placed it farther (up to the full reach). Past that it's dragged by exactly the
+	// excess: along the CLIP'S LINE (the climb push on the wall) the shorter way, else to the nearest spot in reach - on the
+	// surface map when the pin is on it, else on its face's plane - then re-traced onto the real surface (the IK follow moves
+	// with it, so the shown limb doesn't lag). A pinned limb it can't keep on its face within reach: bPredictive (the climb)
+	// -> re-grips on the arc onto this tick's plant; the corner turn -> holds (its stance ends it). Returns true when it
+	// dragged a PINNED target.
 	bool LeashLimbTargetsWithinReach(const USkeletalMeshComponent* Mesh, bool bPredictive);
 
 	// Clip-switch re-grip (bRegripOnClipSwitch), run on the switch tick before the resolvers: every LOCKED limb the new clip
@@ -591,7 +612,24 @@ protected:
 	void DropLimbFromRetreatPlan(int32 Limb);
 
 	// Straight reach of a limb (root to contact tip, reference pose, x mesh scale); cached per mesh asset.
-	float GetLimbReachLength(const USkeletalMeshComponent* Mesh, int32 Limb);
+	float GetLimbReachLength(const USkeletalMeshComponent* Mesh, int32 Limb) const;
+
+	// THE LEASH LIMIT - one definition, used by the leash, the pin placement and (published on FClimbLimbPin::Reach) the
+	// Climb Surface Warp node. Ratio limit = LimbReachLeashRatio x the reach. A HELD limb's limit = its distance when first
+	// held, clamped to [ratio limit, reach] - so a hold the clip placed farther isn't dragged off its spot; any other limb's
+	// = the ratio limit.
+	float GetLimbLeashRatioLimit(const USkeletalMeshComponent* Mesh, int32 Limb) const;
+	float GetLimbLeashLimit(const USkeletalMeshComponent* Mesh, int32 Limb) const;
+
+	// Held, as the reach leash sees it: pinned, or still fading out on its frozen grip - not approaching a plant, not on a
+	// re-grip arc.
+	static bool IsLimbHeldForLeash(const FClimbLimbPin& Pin);
+
+	// The limb's contact point (palm socket / ball) as (the bone it hangs off, offset in that bone's space); cached per mesh.
+	void GetLimbContact(const USkeletalMeshComponent* Mesh, int32 Limb, FName& OutBone, FVector& OutOffset) const;
+
+	// Refreshes the per-mesh reach + contact caches when the mesh asset changes.
+	void RefreshLimbReachCache(const USkeletalMesh* Asset) const;
 	FName GetLimbRootBoneName(int32 Limb) const;
 	FName GetLimbReachTipName(int32 Limb) const;
 
@@ -607,6 +645,13 @@ protected:
 	// smooth, or bClipSwitchBlend is off): Sample Smoothing's Weight Speed if set, else the axes' Input Interpolation time.
 	// The limb IK's clip-switch blend uses it, so it always matches the pose.
 	float GetClimbClipSwitchBlendTime() const;
+
+	// Inside the blendspace clip-switch window (GetClimbClipSwitchBlendTime after the last switch)?
+	bool IsInClimbClipSwitchBlend() const;
+
+	// The IK follow rate this tick (target AND weight): LimbIKFollowSpeed, or inside a clip-switch window a rate covering ~95%
+	// of the pose's crossfade.
+	float GetLimbIKFollowSpeed() const;
 
 	// True when the strike in progress on the dominant climb clip is past its commit marker: the most recent strike marker at
 	// or before the live phase (circular - the clip loops) is a commit, not an end. False without markers / a clip / a phase.
@@ -849,26 +894,16 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Placement", meta = (ForceUnits = "cm", ClampMin = "0.0"))
 	float LimbPinSurfaceOffset = 2.0f;
 
-	// Spring-smooth the Control Rig IK target so a pin that ACQUIRES or RELOCATES (re-grab, corner face-switch) EASES to its
-	// new spot over a few frames instead of popping. It smooths the WORLD target, which is constant while a pin is held, so a
-	// settled plant gets no added lag - only target JUMPS are absorbed. Toggle OFF to compare against the raw, instant target.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Smoothing")
-	bool bUseLimbIKSpring = true;
-
-	// Spring stiffness: higher = snappier (reaches the new target faster), lower = looser / laggier. Pairs with the damping.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Smoothing", meta = (ClampMin = "0.0", EditCondition = "bUseLimbIKSpring"))
-	float LimbIKSpringStiffness = 120.0f;
-
-	// Spring damping: 1 = critically damped (no overshoot - the safe default), < 1 = springy / overshoots, > 1 = overdamped / sluggish.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Smoothing", meta = (ClampMin = "0.0", EditCondition = "bUseLimbIKSpring"))
-	float LimbIKSpringCriticalDamping = 1.0f;
-
-	// Teleport guard: if the target jumps farther than this in one tick (a far relocation, or the first acquire from a stale
-	// last-pin) the spring SNAPS instead of easing across the whole gap. Keep it above a normal re-grab's step but below a
-	// cross-wall jump. Only the ease is skipped - a held pin is unaffected (its target doesn't move). An idle-retreat
-	// sequencer move is EXEMPT: it's an intended long move from a fresh target, so it always eases however far it goes.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Smoothing", meta = (ForceUnits = "cm", ClampMin = "0.0", EditCondition = "bUseLimbIKSpring"))
-	float LimbIKSpringSnapDistance = 50.0f;
+	// IK FOLLOW - how fast the limb IK reaches what the climb asks for: ONE rate for both the IK target (where) and the IK
+	// weight (how much - it chases the destination clip's stance curve). Exponential: each tick closes FollowSpeed x dt of the
+	// remaining gap - ~63% after 1/speed s, ~95% after 3/speed s (15 -> 0.2 s). 0 = no smoothing (raw target and curve).
+	// The target is followed in the body's frame while APPROACHING a plant (it rides with the body, so the body's travel adds
+	// no lag) and in world while HELD (a held pin doesn't move, so a settled plant gets none): only real jumps are eased - an
+	// acquire, a relocation, a direction change. A limb that was invisible last tick (weight 0) starts AT its target, never from
+	// a stale point. Inside a blendspace clip-switch window both use that window's rate instead (bClipSwitchBlend). Lock and
+	// release use the RAW stance value, so pin timing is unaffected. A re-grip arc replaces the target follow while in flight.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|LimbIK|Follow", meta = (ClampMin = "0.0"))
+	float LimbIKFollowSpeed = 15.0f;
 
 	// --- Predictive limb IK (the sustained climb; consumes the baked URogueClimbContactMetaData) ---
 
@@ -918,9 +953,11 @@ protected:
 
 	// REACH LEASH (every climbing context: moving, idle, corner turn) - a limb is never left out of reach. A pinned target -
 	// or one still fading out on its frozen grip after a clip switch - farther than LimbReachLeashRatio x the limb's straight
-	// reference-pose length from its root (shoulder / hip, live pose) is pulled back along its face by exactly the excess,
-	// the shortest way back into reach, and re-traced onto the real surface. It reads as the body dragging a hand that won't
-	// let go, never pulling it straight. No state, no speed: the pin moves only while, and as fast as, the body pulls it.
+	// reference-pose length from its root (shoulder / hip, live pose) - or than its distance when first held, for a hold the
+	// clip placed farther (up to the full reach) - is dragged by exactly the excess: along the clip's line (the climb push on
+	// the wall) the shorter way, else to the nearest spot back in reach, on the surface map when it can (curves are followed),
+	// then re-traced onto the real surface. It reads as the body dragging a hand that won't let go, never pulling it
+	// straight. No speed: the pin moves only while, and as fast as, the body pulls it.
 	// Only a pinned limb it can't keep on its face (the face has no reachable point left, or that point is off the surface -
 	// past an edge) lets go: the climb re-grips it on the arc onto the current plant; the corner turn holds it (the reach cap
 	// bends it) until the corner clip's stance ends. Replaces the over-extension release, the idle reach slide and the old
@@ -972,6 +1009,80 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Reach")
 	FName RightFootReachTipName = FName("ball_r");
 
+	// --- LIMB IK COLLIDERS (for the Control Rig's Climb Limb IK node, FRigUnit_RogueClimbLimbIK) ---
+	// The climb wall as mesh-space half-spaces the knees/elbows keep clear of (ClimbLimbIKPlanes -> the node's Planes pin).
+	// Sustained climb: the dominant plane. Inner corner turn: both faces (the free space is in front of both). Outer corner
+	// turn / off the wall: none - around a convex edge the old face's plane runs through open air. A plane is the baseline
+	// for flat walls; bumps and holes need world probes (not yet).
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|LimbIK|Colliders")
+	bool bPublishLimbIKWallPlanes = true;
+
+	// How far the knee/elbow joint's CENTRE must stay off the wall surface: the joint's own thickness plus a little air.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|LimbIK|Colliders", meta = (ForceUnits = "cm", ClampMin = "0.0", EditCondition = "bPublishLimbIKWallPlanes"))
+	float LimbIKWallMargin = 8.0f;
+
+	// --- CLIMB SURFACE MAP (ClimbSurfaceMap; Docs/climb/surface-warp.md) ---
+	// A grid of the wall over the whole reach area, rebuilt every climbing tick and MARCHED along the surface: one start cell
+	// (nearest the body) is traced straight into the wall, every other cell is stepped to one spacing along the surface from a
+	// neighbour - so the grid wraps round a curve (a cylinder's sides) and cells stay one spacing apart ON the surface. Each
+	// cell records the surface point and normal. The clips are authored on a flat wall, so this is what the pose gets warped
+	// onto (the clip's flat distances become distances along the surface) - and what any limb can ask about before it plants.
+	// Columns run across, rows along the wall's up (gravity flattened onto it).
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap")
+	bool bBuildClimbSurfaceMap = true;
+
+	// Cells across (sideways). Cost = ~2 line traces per cell per climbing tick.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ClampMin = "2", ClampMax = "32", EditCondition = "bBuildClimbSurfaceMap"))
+	int32 ClimbSurfaceMapColumns = 7;
+
+	// Cells along the wall's up.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ClampMin = "2", ClampMax = "32", EditCondition = "bBuildClimbSurfaceMap"))
+	int32 ClimbSurfaceMapRows = 9;
+
+	// How far to each side of the capsule centre the map reaches (cm, along the surface) - cover a sideways reach.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "cm", ClampMin = "1.0", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapHalfWidth = 70.0f;
+
+	// Lowest and highest rows, along the wall's up from the capsule centre (cm, along the surface) - below the feet to above
+	// the hands' reach.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "cm", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapBottom = -110.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "cm", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapTop = 90.0f;
+
+	// The START trace (the one cell traced straight into the wall; the rest are marched) begins this far IN FRONT of the
+	// plane (cm) - past anything that bulges toward the climber (a hold), so it begins in free space.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "cm", ClampMin = "0.0", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapFrontReach = 40.0f;
+
+	// ...and looks this far BEHIND the plane (cm). Deeper = no wall at that cell (the next one nearest the body is tried).
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "cm", ClampMin = "1.0", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapBackReach = 80.0f;
+
+	// A march step whose surface normal turns more than this from the cell it left (degrees) is an edge or a corner, not a
+	// curve: the march stops there. Round a cylinder of radius R one cell turns by spacing / R radians (a 23 cm spacing on a
+	// 75 cm radius: ~18 degrees). A sharp outer edge is never crossed anyway (its far side runs parallel to the step's down
+	// trace); this limit is for inner corners and tight bends.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "deg", ClampMin = "1.0", ClampMax = "89.0", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapMaxTurnPerCell = 50.0f;
+
+	// PINS THROUGH THE MAP: each baked hold is warped onto the real surface (same (u, v) and clearance, measured from the
+	// surface there) and kept within the leash's reach of the limb's root before the confirming trace - which then runs along
+	// the local normal. So a pin lands where the warped swing arrives. Off = the flat-wall anchor traced along the plane normal.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (EditCondition = "bBuildClimbSurfaceMap"))
+	bool bPlacePinsThroughSurfaceMap = true;
+
+	// SURFACE WARP of the pose (the Control Rig's Climb Surface Warp node, before the Climb Limb IK): publishes
+	// ClimbSurfaceWarpWeight - eased to 1 while climbing with a map, back to 0 otherwise (the last map is kept meanwhile, so the
+	// warp fades out instead of dropping). Off = weight 0, the pose isn't warped.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (EditCondition = "bBuildClimbSurfaceMap"))
+	bool bClimbSurfaceWarp = true;
+
+	// How fast ClimbSurfaceWarpWeight eases in and out (1/s, exponential: ~95% in 3/speed s). 0 = instant.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ClampMin = "0.0", EditCondition = "bClimbSurfaceWarp"))
+	float ClimbSurfaceWarpBlendSpeed = 8.0f;
+
 	// --- RE-GRIP SWING (how a limb travels from one grip to another - every lock-to-lock move: an idle-retreat step, a
 	// clip-switch re-grip, the reach leash's last resort) ---
 	// A re-gripping limb is carried along a cubic Bezier - straight up off its grip (along the surface normal), across, and
@@ -982,7 +1093,7 @@ protected:
 	bool bRegripArc = true;
 
 	// Arc OFF only: a re-gripping limb has ARRIVED once its spring-eased IK target is within this of the new grip (the move
-	// is then the limb-IK spring sliding the target across; LimbIKSpringStiffness sets how long it takes).
+	// is then the IK follow sliding the target across; LimbIKFollowSpeed sets how long it takes).
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|RegripSwing", meta = (ForceUnits = "cm", ClampMin = "0.1", EditCondition = "!bRegripArc"))
 	float RegripArrivalTolerance = 2.0f;
 
@@ -1086,19 +1197,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Setup")
 	FName ClimbPhaseCurveName = FName("ClimbPhase");
 
-	// Smooths the predictive IK WEIGHT toward the raw stance-curve value, so a DISCONTINUITY in the weight (the clip playhead
-	// jumping on an idle<->move state transition, or a held approach resuming) eases the foot in instead of snapping it.
-	// Authored ramps are followed closely; only jumps are capped. Higher = snappier/less smoothing; 0 = none (raw weight).
-	// Lock/release still use the RAW stance value, so pin timing is unaffected.
-	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|LimbIK|Smoothing", meta = (ClampMin = "0.0"))
-	float PredictiveWeightInterpSpeed = 12.0f;
-
 	// BLENDSPACE CLIP SWITCH (e.g. W then D: Up -> Up-Right mid-strike): the dominant clip - and with it every limb's destination
 	// landing - changes at once. For as long as the POSE takes to crossfade (GetClimbClipSwitchBlendTime: read off
-	// ClimbBlendSpace's own smoothing, so there's nothing to keep in sync) the limbs blend instead of popping: a target jump
-	// eases through the IK spring even past LimbIKSpringSnapDistance (until it arrives), and the weight eases (in AND out,
-	// ~95% over that time) instead of dropping to 0 when the new clip says the limb is mid-swing. Progress within ONE clip is
-	// unaffected (its plant-to-plant jumps happen at weight 0). Off = the old instant switch.
+	// ClimbBlendSpace's own smoothing, so there's nothing to keep in sync) the limbs blend instead of popping: the IK follow
+	// runs at a rate covering ~95% of that time for the target AND the weight, and the weight eases OUT instead of dropping
+	// to 0 when the new clip says the limb is mid-swing. Progress within ONE clip is unaffected (its plant-to-plant jumps
+	// happen at weight 0). Off = the old instant switch (the follow keeps LimbIKFollowSpeed).
 	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|LimbIK|ClipSwitch")
 	bool bClipSwitchBlend = true;
 
@@ -1483,6 +1587,21 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|WeightShift", meta = (AllowPrivateAccess = "true"))
 	FRotator ClimbChestRotation = FRotator::ZeroRotator;
 
+	// The climb wall(s) as MESH-SPACE half-spaces for the Control Rig's Climb Limb IK (feed straight into its Planes pin): one
+	// while climbing, both faces in an inner corner turn, none otherwise (RefreshLimbIKPlanes, end of RefreshLimbPins).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK", meta = (AllowPrivateAccess = "true"))
+	TArray<FRogueLimbIKPlane> ClimbLimbIKPlanes;
+
+	// The marched surface map of the wall around the climber, WORLD space (RefreshClimbSurfaceMap). World, not mesh space: the
+	// movement update moves the body after this is built, so a consumer converts with the transform it actually renders with.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap", meta = (AllowPrivateAccess = "true"))
+	FClimbSurfaceMap ClimbSurfaceMap;
+
+	// Strength of the pose's surface warp for the Control Rig's Climb Surface Warp node (its Weight pin): 1 while climbing
+	// with a map, eased (ClimbSurfaceWarpBlendSpeed); 0 off the wall. RefreshClimbSurfaceMap.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap", meta = (AllowPrivateAccess = "true"))
+	float ClimbSurfaceWarpWeight = 0.0f;
+
 	// The weight shift's smoothed WORLD offset + its rate (CriticallyDampedSmoothing state).
 	FVector BodyShiftWorld = FVector::ZeroVector;
 	FVector BodyShiftRate = FVector::ZeroVector;
@@ -1518,8 +1637,15 @@ protected:
 	// Last tick's idle state (an idle<->move edge clears every limb's bClipSwitchRegripped) and the cached straight reach per
 	// limb (reference pose; rebuilt when the mesh asset changes - the reach leash and the reach cap measure against it).
 	bool bLimbPinsWasIdle = false;
-	float LimbReachLengthCache[RogueClimbLimb::Count] = {};
-	TWeakObjectPtr<const USkeletalMesh> LimbReachLengthCacheMesh;
+	mutable float LimbReachLengthCache[RogueClimbLimb::Count] = {};
+	mutable FName LimbContactBoneCache[RogueClimbLimb::Count];
+	mutable FVector LimbContactOffsetCache[RogueClimbLimb::Count];
+	mutable TWeakObjectPtr<const USkeletalMesh> LimbReachLengthCacheMesh;
+
+	// The mesh transform at the last IK-follow update: an APPROACHING target is carried along by the body's motion since then
+	// before it chases its raw target (RefreshLimbPins), so the body's travel adds no follow lag.
+	FTransform LimbFollowMeshXform = FTransform::Identity;
+	bool bHasLimbFollowMeshXform = false;
 
 	// Per-foot sim time (ms) until which that foot's plant/hang state may not flip again (FootHangCooldownSeconds debounce).
 	double LeftFootHangUnlockSimTimeMs = 0.0;
