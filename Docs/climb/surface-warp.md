@@ -28,6 +28,25 @@ rig (anim):           input pose → weight shift → Climb Surface Warp → Cli
 - **Per cell:** `bValid`, plus the world `Point` and `Normal` of the surface.
 - **Empty cells:** a hole, past an edge or a corner, or not a wall (a floor, a ledge top).
 
+### Map vs the 3×5 coverage grid
+Both sample the wall in front of the climber, and the grid's area sits inside the map's. They have different jobs.
+
+| | 3×5 coverage grid ([Enter detection](climb-enter-detection.md)) | Surface map |
+|---|---|---|
+| Job | **Decides**: can I climb, can I move, should I fall off | **Describes**: where exactly the surface is, for the pose |
+| Feeds | The sim: entry / exit, `CanMoveWhileClimbing`, the dominant plane (climb mode, standoff, capsule tilt, mantle and corner probes) | Presentation only: the warp, pin placement, the leash |
+| When | Every tick, including **before** climbing; skipped if the sweep sees nothing | Only while climbing |
+| Traces | 15, along the capsule's forward | ~2 per cell (~130): one start trace, the rest marched |
+| Area | ±30 cm × about −20…+80 cm | ±70 cm × −110…+90 cm (along the surface) |
+| Shape | Coarse on purpose: one smoothed plane; rejects normals > 35° off it | Detailed on purpose: wraps round curves, bridges small holes |
+| Dependency | Produces the dominant plane | Built **from** that plane (its frame and its start trace) |
+
+- **Kept separate on purpose:**
+  - The map can't run before climbing, because it needs the grid's plane.
+  - Gating on the map would let visual tuning (hole bridging, edge extension) change when you fall off.
+  - The grid's job is to collapse a curve into one stable plane; the map's job is not to.
+- **Possible merge, not planned:** while climbing, the gates and the plane could come from the map cells inside the grid's footprint, leaving the grid for entry only. That saves 15 traces a tick, but adds a frame loop and needs the gates retuned in surface distances.
+
 ### How it's marched (`FClimbSurfaceMap::Build`)
 - **Start cell:** the cell nearest the body is traced straight into the wall along `−Normal`.
   - The trace runs from `FrontReach` in front of the plane to `BackReach` behind it.

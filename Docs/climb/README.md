@@ -8,12 +8,12 @@ The code lives in `Source/ActionRoguelike/Player/Movement/` (the climb, mantle a
 
 | Doc | Covers |
 |---|---|
-| [Detection & wall contact](detection.md) | the forward sweep, the 3×5 validation grid, the wall-vs-walk gate, the standoff controller |
+| [Enter detection & wall contact](climb-enter-detection.md) | the forward sweep, the 3×5 grid and its gates, the wall-vs-walk rule, the dominant plane, enter / exit, the standoff controller |
 | [Surface map & warp](surface-warp.md) | the marched surface map, the warp formula, per-joint, reach rule, pins + leash through the map |
 | [Hang](hang.md) | gross hang + per-foot probes, the hang anim recipe, hang-move experiments, the procedural tuck |
 | [Limb IK](limb-ik.md) | pins (where + how much: predictive placement, IK follow, corner pins, foot probes) and the Climb Limb IK swivel solver |
 | [Stopping well: the idle retreat](idle-retreat.md) | bad-segment skip, sequenced retreat, re-grip swing, weight shift, reach leash + cap, clip-switch blend |
-| [Animation ↔ movement sync](movement-sync.md) | the distance curve, round → square input, scalar vs full root motion |
+| [Climb locomotion](climb-locomotion.md) | the body follows the clip: the ClimbDistance curve, round → square input, scalar vs full root motion |
 | [Mantle up & down](mantle.md) | the shared skeleton, the top-out probe + lip scan + steep tilts, the always-succeed mantle down, the retarget fix, the end-pose seam |
 | [Corner turns](corner-turns.md) | the corner probe, the input-driven turn, the custom playhead warp |
 
