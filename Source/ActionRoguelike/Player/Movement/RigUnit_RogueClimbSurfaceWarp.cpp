@@ -20,6 +20,7 @@ FRigUnit_RogueClimbSurfaceWarp_Execute()
 
 	Shift = 0.0f;
 	bReachLimited = false;
+	SurfaceWeight = 0.0f;
 
 	if (!CachedItemA.UpdateCache(ItemA, Hierarchy) || !CachedItemB.UpdateCache(ItemB, Hierarchy)
 		|| !CachedEffectorItem.UpdateCache(EffectorItem, Hierarchy))
@@ -59,10 +60,12 @@ FRigUnit_RogueClimbSurfaceWarp_Execute()
 	// movement update moved the body).
 	const FClimbSurfaceMap Map = SurfaceMap.Transformed(ExecuteContext.GetToWorldSpaceTransform().Inverse());
 
-	// --- The effector onto the surface, within reach.
+	// --- The effector onto the surface, within reach. Past the wall's edge it snaps onto surface within the map's SnapRadius
+	// and fades back toward the clip as that surface gets farther; over a void (none within it) the clip's pose is kept.
 	FVector Warped;
 	FQuat SurfaceRotation;
 	bool bLimited = false;
+	double Surface = 0.0;
 	if (Reach.Limit > SMALL_NUMBER)
 	{
 		// The reach is measured to the CONTACT point (palm / ball), exactly as the component's leash measures it. The search
@@ -77,15 +80,16 @@ FRigUnit_RogueClimbSurfaceWarp_Execute()
 		}
 		const FVector ContactShift = FKContact - FKEnd;
 		const double MaxReach = FMath::Max(static_cast<double>(Reach.Limit), FVector::Dist(Root, FKContact));
-		if (!Map.WarpPointWithinReach(FKEnd, Root - ContactShift, MaxReach, Warped, SurfaceRotation, &bLimited))
+		if (!Map.WarpPointWithinReach(FKEnd, Root - ContactShift, MaxReach, Warped, SurfaceRotation, &bLimited, &Surface))
 		{
-			return; // no surface anywhere near this limb - leave the clip's pose
+			return; // over a void - leave the clip's pose
 		}
 	}
-	else if (!Map.WarpPoint(FKEnd, Warped, SurfaceRotation))
+	else if (!Map.WarpPoint(FKEnd, Warped, SurfaceRotation, &Surface))
 	{
 		return;
 	}
+	SurfaceWeight = static_cast<float>(Surface);
 	const FVector Target = FMath::Lerp(FKEnd, Warped, static_cast<double>(Alpha));
 	const FQuat TargetRotation = (FQuat::Slerp(FQuat::Identity, SurfaceRotation, Alpha) * FKTransformC.GetRotation()).GetNormalized();
 
@@ -124,7 +128,9 @@ FRigUnit_RogueClimbSurfaceWarp_Execute()
 		return;
 	}
 	const FTransform& Offset = DebugSettings.WorldOffset;
-	const FLinearColor WarpColor = bReachLimited ? FLinearColor(1.0f, 0.55f, 0.0f) : FLinearColor(0.0f, 0.85f, 0.9f);
+	// Cyan = warped; orange = the reach rule moved it; toward grey as the warp fades past the wall's edge.
+	const FLinearColor FullColor = bReachLimited ? FLinearColor(1.0f, 0.55f, 0.0f) : FLinearColor(0.0f, 0.85f, 0.9f);
+	const FLinearColor WarpColor = FMath::Lerp(FLinearColor(0.55f, 0.55f, 0.6f), FullColor, SurfaceWeight);
 	Draw->DrawLine(Offset, FKEnd, TransformC.GetLocation(), WarpColor, 0.5f);
 	Draw->DrawPoint(Offset, FKEnd, 4.0f, FLinearColor(0.6f, 0.6f, 0.7f));
 	Draw->DrawPoint(Offset, TransformC.GetLocation(), 6.0f, WarpColor);

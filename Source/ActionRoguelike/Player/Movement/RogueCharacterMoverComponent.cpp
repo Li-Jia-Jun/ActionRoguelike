@@ -844,6 +844,16 @@ void URogueCharacterMoverComponent::RefreshFootProbes()
 	bLowerBodyHanging = bFacingClimbableSurface && LeftFootProbe.bHanging && RightFootProbe.bHanging;
 }
 
+bool URogueCharacterMoverComponent::IsFootHanging(int32 Limb) const
+{
+	switch (Limb)
+	{
+	case RogueClimbLimb::LeftFoot:  return LeftFootProbe.bHanging;
+	case RogueClimbLimb::RightFoot: return RightFootProbe.bHanging;
+	default:                        return false;
+	}
+}
+
 FClimbFootProbeResult URogueCharacterMoverComponent::ProbeFoot(FName FootSocketName, bool bWasHanging) const
 {
 	// Dynamic per-foot probe: sphere-sweep from the ANIMATED foot bone toward the dominant climb plane to find a
@@ -1121,6 +1131,20 @@ void URogueCharacterMoverComponent::RefreshLimbPins()
 		ResolveLimbPinPredictive(RightHandPin, RogueClimbLimb::RightHand, RightHandStanceCurveName, DominantClip, MeshXform, WallNormal, PlanePoint, HandProbeRadius, HandProbeReach, HandProbeBackoff, bIdle);
 	}
 
+	// Per-foot HANG ALPHA (the foot probe's bHanging, eased at FootHangBlendSpeed - the same rate a hanging foot's pin weight
+	// fades out in the resolver) and each limb's WARP WEIGHT for the Climb Surface Warp node: the climb's warp, faded out while
+	// a foot hangs, so a dangling leg keeps the hang pose. Every tick, in every state (the probes freeze through a corner turn
+	// and read "not hanging" off the wall, so the alpha follows them).
+	for (int32 Limb = 0; Limb < RogueClimbLimb::Count; ++Limb)
+	{
+		FClimbLimbPin* Pin = AllPins[Limb];
+		const float HangTarget = IsFootHanging(Limb) ? 1.0f : 0.0f;
+		Pin->HangAlpha = (FootHangBlendSpeed > 0.0f && LastPreSimDeltaSeconds > 0.0f)
+			? FMath::FInterpTo(Pin->HangAlpha, HangTarget, LastPreSimDeltaSeconds, FootHangBlendSpeed)
+			: HangTarget;
+		Pin->WarpWeight = ClimbSurfaceWarpWeight * (1.0f - Pin->HangAlpha);
+	}
+
 	// Convert each world pin into the MESH COMPONENT's space for the Control Rig (its effectors are component-space;
 	// feeding a world position flings the rig). Done every tick in both paths, so a held pin stays world-fixed while its
 	// component-space value tracks the moving mesh, and a pin blending out still resolves to its frozen world spot.
@@ -1292,6 +1316,31 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceMap()
 	Settings.FrontReach = ClimbSurfaceMapFrontReach;
 	Settings.BackReach = ClimbSurfaceMapBackReach;
 	Settings.MaxTurnPerCellDegrees = ClimbSurfaceMapMaxTurnPerCell;
+	{
+		// The snap radius in cm: ClimbSurfaceMapSnapCells x the mean cell spacing (across and up).
+		const double SpacingX = (2.0 * ClimbSurfaceMapHalfWidth) / FMath::Max(ClimbSurfaceMapColumns - 1, 1);
+		const double SpacingY = (ClimbSurfaceMapTop - ClimbSurfaceMapBottom) / FMath::Max(ClimbSurfaceMapRows - 1, 1);
+		Settings.SnapRadius = ClimbSurfaceMapSnapCells * 0.5 * (FMath::Abs(SpacingX) + FMath::Abs(SpacingY));
+	}
+	// START ANCHOR: the coverage grid's valid hit nearest the body - wall the climb itself confirmed this tick (in a full hang,
+	// that's up at the hands). The map puts its start cell exactly on it.
+	{
+		double BestDistSq = TNumericLimits<double>::Max();
+		for (const FClimbSurfaceSample& Sample : ClimbSurfaceSamplesCache)
+		{
+			if (!Sample.bHit)
+			{
+				continue;
+			}
+			const double DistSq = FVector::VectorPlaneProject(Sample.Point - Origin, N).SizeSquared();
+			if (DistSq < BestDistSq)
+			{
+				BestDistSq = DistSq;
+				Settings.StartHint = Sample.Point;
+				Settings.bHasStartHint = true;
+			}
+		}
+	}
 	const FVector UpDirection = GetUpDirection();
 	ClimbSurfaceMap.Build(Origin, N, UpDirection, Settings,
 		[this, World, &UpDirection](const FVector& Start, const FVector& End, FClimbSurfaceMapHit& OutHit)
@@ -1368,10 +1417,18 @@ void URogueCharacterMoverComponent::RefreshClimbSurfaceMap()
 		{
 			DrawDebugLine(World, Corners[Index], Corners[(Index + 1) % 4], PlaneColor, false, -1.0f, 0, 0.5f);
 		}
+		// The start cell: a white ring (the march grew from here).
+		if (ClimbSurfaceMap.Cells.IsValidIndex(ClimbSurfaceMap.StartCell))
+		{
+			const FClimbSurfaceMapCell& Start = ClimbSurfaceMap.Cells[ClimbSurfaceMap.StartCell];
+			DrawDebugCircle(World, Start.Point + Start.Normal * 0.5f, 5.0f, 12, FColor::White, false, -1.0f, 0, 0.8f,
+				ClimbSurfaceMap.Right, FVector::CrossProduct(Start.Normal, ClimbSurfaceMap.Right).GetSafeNormal(), false);
+		}
 		const FString Readout = NumValid > 0
 			? FString::Printf(TEXT("surface map %d/%d cells, gap to the flat wall %+.0f .. %+.0f cm"),
 				NumValid, ClimbSurfaceMap.Cells.Num(), MinGap, MaxGap)
-			: FString::Printf(TEXT("surface map 0/%d cells"), ClimbSurfaceMap.Cells.Num());
+			: FString::Printf(TEXT("surface map 0/%d cells - no start cell (no wall at the anchor or near the body)"),
+				ClimbSurfaceMap.Cells.Num());
 		DrawDebugString(World, Corners[2] + ClimbSurfaceMap.Normal * 10.0f, Readout, nullptr, FColor::White, -1.0f, false, 1.0f);
 	}
 #endif
@@ -1543,6 +1600,22 @@ void URogueCharacterMoverComponent::ResolveLimbPinPredictive(FClimbLimbPin& Pin,
 	const UAnimSequence* DominantClip, const FTransform& MeshXform, const FVector& WallNormal, const FVector& PlanePoint,
 	float ProbeRadius, float ProbeReach, float ProbeBackoff, bool bIdle) const
 {
+	// A HANGING foot (its probe found no foothold): no plant. Let go - unpinned, not approaching or re-gripping - and fade the
+	// weight out at FootHangBlendSpeed, in step with the foot's HangAlpha, so the IK hands the leg to the hang pose smoothly.
+	// Its Location stays frozen meanwhile (aimed where it was while it fades). Nothing approaches or locks until a foothold is
+	// back; then the stance curve takes over and the weight eases back in at the IK follow rate.
+	if (IsFootHanging(Limb))
+	{
+		Pin.bPinned = false;
+		Pin.bApproaching = false;
+		Pin.bRegripSwing = false;
+		Pin.bClipSwitchRegripped = false;
+		Pin.Weight = (FootHangBlendSpeed > 0.0f && LastPreSimDeltaSeconds > 0.0f)
+			? FMath::FInterpTo(Pin.Weight, 0.0f, LastPreSimDeltaSeconds, FootHangBlendSpeed)
+			: 0.0f;
+		return;
+	}
+
 	// Idle with NO idle clip assigned: HOLD the current pin state untouched (the simple behavior) - a planted limb stays
 	// gripped where it last was while the body settles. With an idle clip assigned it is passed in as DominantClip, so we
 	// fall through and resolve against IT: a limb that is unpinned (caught mid-swing, or released by the idle-retreat
@@ -1769,7 +1842,8 @@ void URogueCharacterMoverComponent::BuildIdleRetreatPlan(const UAnimSequence* Id
 		const FClimbLimbPin& Pin = GetLimbPin(Limb);
 		const FRogueClimbLimbContact* Contact = GetLimbContact(IdleClip, GetLimbStanceCurveName(Limb));
 		const FRogueClimbLimbPlant* Plant = Contact ? Contact->FindNearestPlant(PhaseTime, ClipLength) : nullptr;
-		if (!Pin.bPinned || !Plant)
+		// A hanging foot has no grip to retreat from (its pin is released anyway): never a step.
+		if (!Pin.bPinned || !Plant || IsFootHanging(Limb))
 		{
 			continue;
 		}
@@ -1873,16 +1947,23 @@ void URogueCharacterMoverComponent::AdvanceIdleRetreat()
 	// The follower trails the lead by the stagger - overlapping, never simultaneous (BeginRegripSwing: unpin + swing).
 	// The weight shift leads the lift: the step's limbs UNLOAD at its start (IsLimbUnloaded - the body starts moving onto the
 	// others) and only lift WeightShiftLead later. 0, or the shift off, = lift at once.
+	// A foot that started hanging after the plan was built has nothing to swing to: it counts as released and arrived.
 	const double LiftDelay = bIdleWeightShift ? WeightShiftLead : 0.0;
 	if (!bRetreatLeadReleased && Elapsed >= LiftDelay)
 	{
-		BeginRegripSwing(GetLimbPin(Step.Lead));
+		if (!IsFootHanging(Step.Lead))
+		{
+			BeginRegripSwing(GetLimbPin(Step.Lead));
+		}
 		bRetreatLeadReleased = true;
 	}
 	const bool bPair = Step.Follow != INDEX_NONE;
 	if (bPair && !bRetreatFollowReleased && Elapsed >= LiftDelay + IdleRetreatPairStagger)
 	{
-		BeginRegripSwing(GetLimbPin(Step.Follow));
+		if (!IsFootHanging(Step.Follow))
+		{
+			BeginRegripSwing(GetLimbPin(Step.Follow));
+		}
 		bRetreatFollowReleased = true;
 	}
 
@@ -1937,8 +2018,8 @@ bool URogueCharacterMoverComponent::LeashLimbTargetsWithinReach(const USkeletalM
 
 		// HELD targets only: a pinned one, or one still fading out on its frozen grip (a clip switch eases a released limb's
 		// weight out). Not one approaching a plant (the resolver re-resolves it from the live body every tick) or travelling a
-		// re-grip arc (it lands on a fresh grip).
-		if (!IsLimbHeldForLeash(Pin))
+		// re-grip arc (it lands on a fresh grip), and not a hanging foot fading out (it holds nothing).
+		if (!IsLimbHeldForLeash(Pin) || IsFootHanging(Limb))
 		{
 			continue;
 		}
@@ -2402,24 +2483,33 @@ void URogueCharacterMoverComponent::RefreshClimbWeightShift(const USkeletalMeshC
 	const FVector WallUp = N.IsZero() ? FVector::ZeroVector : FVector::VectorPlaneProject(Up, N).GetSafeNormal();
 	const FVector WallRight = FVector::CrossProduct(N, WallUp).GetSafeNormal();
 
-	// Target: zero unless the idle-retreat sequencer has a limb unloaded (moving, corner turns and rest all ease back to 0).
+	// Target: zero unless a limb is unloaded - the idle-retreat sequencer's step, or a foot hanging at idle (counted as
+	// swinging) - so moving, corner turns and rest all ease back to 0. Not in a full lower-body hang (both feet): the hang pose
+	// owns the body there, and shifting it toward the hands would read as a pull-up.
 	FVector Target = FVector::ZeroVector;
 	FVector LoadCentroid = FVector::ZeroVector;
 	FVector FullCentroid = FVector::ZeroVector;
 	bool bAnyUnloaded = false;
-	if (bIdleWeightShift && IsClimbing() && !WallUp.IsZero())
+	if (bIdleWeightShift && IsClimbing() && !WallUp.IsZero() && !IsLowerBodyHanging())
 	{
+		const bool bIdle = GetClimbMoveSpeedFraction() <= FootPlantIdleInputDeadzone;
 		FVector LoadSum = FVector::ZeroVector;
 		int32 LoadCount = 0;
 		bool bHandUnloaded = false;
 		for (int32 Limb = 0; Limb < RogueClimbLimb::Count; ++Limb)
 		{
 			const FClimbLimbPin& Pin = GetLimbPin(Limb);
-			const bool bUnloaded = IsLimbUnloaded(Limb);
+			const bool bHangingFoot = bIdle && IsFootHanging(Limb);
+			const bool bUnloaded = IsLimbUnloaded(Limb) || bHangingFoot;
 
 			// The grip the limb bears (or bore) weight on. A released retreating limb's pin is already re-locked at its idle
-			// grip, so it counts from where it left (only the along-wall part matters, so the swing's standoff is harmless).
-			const FVector Grip = (bUnloaded && Pin.bRegripSwing) ? Pin.RegripSwingFrom : Pin.Location;
+			// grip, so it counts from where it left (only the along-wall part matters, so the swing's standoff is harmless). A
+			// hanging foot counts from its last hold, or - never held - from where the foot is.
+			FVector Grip = (bUnloaded && Pin.bRegripSwing) ? Pin.RegripSwingFrom : Pin.Location;
+			if (bHangingFoot && !Pin.bHasLastPin && Mesh)
+			{
+				Grip = Mesh->GetSocketLocation(Limb == RogueClimbLimb::LeftFoot ? LeftFootSocketName : RightFootSocketName);
+			}
 			FullCentroid += Grip;
 			if (bUnloaded)
 			{

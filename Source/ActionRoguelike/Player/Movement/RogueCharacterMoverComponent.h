@@ -112,6 +112,17 @@ struct FClimbLimbPin
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK")
 	FClimbLimbReach Reach;
 
+	// FEET: how far this foot has faded into its hang - its foot probe's bHanging, eased at FootHangBlendSpeed (0 for the
+	// hands). The pin's own Weight fades out at the same rate while the foot hangs, so a per-leg hang blend driven by this
+	// alpha moves in step with the IK letting go.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK")
+	float HangAlpha = 0.0f;
+
+	// Control Rig (the Climb Surface Warp node's Weight pin): ClimbSurfaceWarpWeight x (1 - HangAlpha) - the climb's warp,
+	// faded out while this foot hangs (a dangling leg keeps the hang pose). Hands: ClimbSurfaceWarpWeight.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|LimbIK")
+	float WarpWeight = 0.0f;
+
 	// --- internal latch (persists across ticks; NOT exposed - Weight > 0 is the public "is pinned") ---
 	bool bPinned = false;                             // currently holding a world-locked pin (the one-way ratchet)
 	bool bHasLastPin = false;                         // a pin has been established at least once (arm fallback grace-holds it)
@@ -302,6 +313,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
 	bool IsRightFootHanging() const { return RightFootProbe.bHanging; }
+
+	// By RogueClimbLimb id: that foot's probe found no foothold (false for the hands).
+	bool IsFootHanging(int32 Limb) const;
 
 	// True while the climb movement mode is the active movement mode (the sustained climb ONLY - see IsInClimbState).
 	UFUNCTION(BlueprintPure, Category = "Mover|Climbing")
@@ -569,9 +583,10 @@ protected:
 	// Pin.bRegripSwing when the swing completes (the sequencer's arrival).
 	FVector EvaluateRegripSwing(FClimbLimbPin& Pin, const FVector& To, FVector& OutNormal) const;
 
-	// Idle-retreat WEIGHT SHIFT. A limb is UNLOADED from its sequencer step's start until it lands (IsLimbUnloaded).
-	// RefreshClimbWeightShift (end of RefreshLimbPins) shifts the body toward the limbs still bearing weight, presses the
-	// hips in while a hand is unloaded, smooths it, and publishes ClimbBodyShift + ClimbChestRotation in mesh space.
+	// Idle-retreat WEIGHT SHIFT. A limb is UNLOADED from its sequencer step's start until it lands (IsLimbUnloaded), and a
+	// hanging foot counts as unloaded at idle (as if swinging). RefreshClimbWeightShift (end of RefreshLimbPins) shifts the body
+	// toward the limbs still bearing weight, presses the hips in while a hand is unloaded, smooths it, and publishes
+	// ClimbBodyShift + ClimbChestRotation in mesh space. Off in a full lower-body hang (both feet): the hang pose owns the body.
 	bool IsLimbUnloaded(int32 Limb) const;
 	void RefreshClimbWeightShift(const USkeletalMeshComponent* Mesh);
 
@@ -838,6 +853,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Mover|Climbing|FootIK", meta = (ForceUnits = "s", ClampMin = "0.0"))
 	float FootHangCooldownSeconds = 0.12f;
 
+	// A HANGING foot (its probe found no foothold) lets go: its pin releases - no approach, no lock, no idle retreat, counted
+	// as swinging by the weight shift - and its IK weight fades out at this rate, with the pin's HangAlpha fading in and its
+	// WarpWeight out alongside (1/s, exponential: ~95% in 3/speed s). Match it to the AnimBP's per-leg hang blend, or drive
+	// that blend by HangAlpha. 0 = instant.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|FootIK", meta = (ClampMin = "0.0"))
+	float FootHangBlendSpeed = 10.0f;
+
 	// --- Per-hand grip probe (sweep params for a hand's contact trace) ---
 	// A hand's grip is found by sweeping toward the wall: from the baked landing's anchor (predictive climb) or the live hand
 	// bone (corner turn). These tune that sweep; it also backs the arm edge-search fallback.
@@ -1066,6 +1088,12 @@ protected:
 	// trace); this limit is for inner corners and tight bends.
 	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ForceUnits = "deg", ClampMin = "1.0", ClampMax = "89.0", EditCondition = "bBuildClimbSurfaceMap"))
 	float ClimbSurfaceMapMaxTurnPerCell = 50.0f;
+
+	// SNAP RADIUS, in cells (one cell ~24 cm with the defaults): a warped point (the pose warp, a planned hold) past the wall's
+	// edge moves onto the surface it finds within this, and the warp fades out as that surface gets farther - full up to half
+	// of it, none at all of it. Beyond it (a foot dangling over a void) nothing is warped: the clip's pose stays.
+	UPROPERTY(EditAnywhere, Category = "Mover|Climbing|SurfaceMap", meta = (ClampMin = "0.25", ClampMax = "4.0", EditCondition = "bBuildClimbSurfaceMap"))
+	float ClimbSurfaceMapSnapCells = 1.0f;
 
 	// PINS THROUGH THE MAP: each baked hold is warped onto the real surface (same (u, v) and clearance, measured from the
 	// surface there) and kept within the leash's reach of the limb's root before the confirming trace - which then runs along

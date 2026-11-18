@@ -56,9 +56,16 @@ struct FClimbSurfaceMapBuildSettings
 	// must face the climber (StartFacingDot), like every climb probe.
 	double MinFacingDot = 0.0;
 	double StartFacingDot = 0.3;
-	// Up to this many cells nearest the body are tried as the start (the body's own cell can sit over a hole - a dead hang
-	// under a lip, a gap between holds).
+	// START ANCHOR: a world point already known to be wall (the coverage grid's valid hit nearest the body). The grid shifts by
+	// up to half a cell so one cell sits exactly on it, and that cell is the start - so the start finds the wall wherever the
+	// climb itself found it (up at the hands in a full hang, on a lip face thinner than a row). If the hint lies outside the
+	// grid or its trace misses, the start falls back to the cells nearest the body.
+	bool bHasStartHint = false;
+	FVector StartHint = FVector::ZeroVector;
+	// Fallback: up to this many cells nearest the body are tried as the start.
 	int32 MaxStartAttempts = 8;
+	// Published as FClimbSurfaceMap::SnapRadius (cm along the surface): see there.
+	double SnapRadius = 24.0;
 };
 
 /**
@@ -141,17 +148,28 @@ struct FClimbSurfaceMap
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap")
 	FVector2D Max = FVector2D::ZeroVector;
 
+	// SNAP: how far (cm, along the surface) a point with no surface under it may be moved onto nearby surface (FindSurface).
+	// The warp fades out as that surface gets farther - full up to half of this, nothing at all of it - so a foot just past
+	// the wall's edge still finds it, and one dangling over a void keeps the clip's (or the hang anim's) pose.
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap")
+	float SnapRadius = 0.0f;
+
 	// Row-major: Cells[Row * Columns + Column].
 	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap")
 	TArray<FClimbSurfaceMapCell> Cells;
+
+	// The cell the march started from (an index into Cells); INDEX_NONE = no wall found to start from (every cell empty).
+	UPROPERTY(BlueprintReadOnly, Category = "Mover|Climbing|SurfaceMap")
+	int32 StartCell = INDEX_NONE;
 
 	/** Set up the frame and an empty (all-invalid) grid. Right = Normal x Up (the climber's right). */
 	void Reset(const FVector& InOrigin, const FVector& InNormal, const FVector& InUp, int32 InColumns, int32 InRows,
 		const FVector2D& InMin, const FVector2D& InMax);
 
 	/**
-	 * Reset, then MARCH the grid over the surface with the owner's line trace. The start cell (the one nearest the body that
-	 * hits a wall facing the climber) is traced straight into the wall and keeps its plane (u, v) as its (s, t). Its row is
+	 * Reset, then MARCH the grid over the surface with the owner's line trace. The start cell - anchored on Settings.StartHint
+	 * (the grid shifted by up to half a cell to put a cell on it), else the cell nearest the body that hits a wall facing the
+	 * climber - is traced straight into the wall and keeps its plane (u, v) as its (s, t). Its row is
 	 * marched left and right, every column up and down from that row, then cells still empty are tried sideways from a filled
 	 * neighbour. A march steps over one empty cell (a small hole) and stops at the second, at an edge, or at a turn sharper
 	 * than MaxTurnPerCellDegrees. Cost: ~2 line traces per cell.
@@ -188,34 +206,52 @@ struct FClimbSurfaceMap
 
 	/**
 	 * The surface at (s, t): bilinear over the four surrounding cells. A missing corner (a hole) is extended from the valid
-	 * ones along their tangents, so a point next to a hole stays where it belongs. OutCoverage = the share of the bilinear
-	 * weight that was valid (1 = all four, 0 = none) - fade a correction by it near holes. Outside the grid it carries on
-	 * along the edge's tangent (flat past the edge). False only with no valid corner.
+	 * ones along their tangents, so a point next to a hole stays where it belongs. Outside the grid it carries on along the
+	 * edge's tangent (flat past the edge). False only with no valid corner.
+	 * OutCoverage = how much real surface is around (bilinear over the corners' support - IsCellSupported): 1 on the surface
+	 * and over a one-cell hole, falling to 0 one cell past the last valid cell. ON the surface = coverage >= 0.5, i.e. the
+	 * wall's edge is taken halfway between the last valid cell and the first empty one (IsOnSurface).
 	 */
 	bool Sample(const FVector2D& UV, FVector& OutPoint, FVector& OutNormal, double* OutCoverage = nullptr) const;
+
+	/** Coverage >= 0.5 at (s, t) (see Sample): the point is on the wall, not past its edge or over a hole bigger than a cell. */
+	bool IsOnSurface(const FVector2D& UV) const;
+
+	/**
+	 * The surface spot for (s, t): (s, t) itself when it's on the surface (OutDistance 0); otherwise the nearest on-surface
+	 * spot within SnapRadius (a ring of directions, then refined) and its distance. False when there's none - over a void.
+	 */
+	bool FindSurface(const FVector2D& UV, FVector2D& OutUV, double& OutDistance) const;
+
+	/** How much of the warp a point gets whose surface is Distance away (FindSurface): 1 up to SnapRadius / 2, 0 at SnapRadius. */
+	double SnapWeight(double Distance) const;
 
 	/**
 	 * THE WARP: a point of the flat-wall pose, moved onto the real surface. Its flat (u, v) becomes (s, t) - the same
 	 * distances, measured along the surface - and its height above the plane (the clip's clearance) is kept, measured from
 	 * the surface there along its normal. OutRotation turns the plane normal into the local normal: apply it to the point's
-	 * orientation (a hand lies flat on the curve). False where the map has no surface around.
+	 * orientation (a hand lies flat on the curve).
+	 * WarpPoint SNAPS and FADES (FindSurface, SnapWeight): a point past the wall's edge moves onto the surface it finds within
+	 * SnapRadius, and the result blends back toward Flat as that surface gets farther - OutSurfaceWeight is the blend (1 =
+	 * fully warped). False over a void (no surface within SnapRadius): leave the point as it is.
+	 * WarpPointAt is the raw lookup at (s, t): no snap, no fade; false only with no valid corner around.
 	 */
-	bool WarpPoint(const FVector& Flat, FVector& OutWarped, FQuat& OutRotation) const;
-	bool WarpPointAt(const FVector2D& UV, double Height, FVector& OutWarped, FQuat& OutRotation) const;
+	bool WarpPoint(const FVector& Flat, FVector& OutWarped, FQuat& OutRotation, double* OutSurfaceWeight = nullptr) const;
+	bool WarpPointAt(const FVector2D& UV, double Height, FVector& OutWarped, FQuat& OutRotation, double* OutCoverage = nullptr) const;
 
 	/**
-	 * WarpPoint, kept within reach of Root (a shoulder or hip): if the warped point is farther than MaxReach from Root, or
-	 * there's no surface under it, it moves to the NEAREST spot on the map (searched in a ring of directions in (s, t)) that
-	 * has surface and is in reach - so a wide reach on a convex wall comes in sideways, keeping its height. OutReachLimited =
-	 * it had to move. If nothing within reach qualifies, falls back to the plain warp (the limb then straightens toward it);
-	 * false only when there's no surface at the point either.
+	 * WarpPoint, kept within reach of Root (a shoulder or hip): after the snap, if the warped point is farther than MaxReach
+	 * from Root, it moves to the NEAREST on-surface spot (a ring of directions in (s, t)) that is in reach - so a wide reach
+	 * on a convex wall comes in sideways, keeping its height. OutReachLimited = it had to move. If nothing in reach
+	 * qualifies, the snapped spot is used (the limb then straightens toward it). Fades like WarpPoint; false over a void.
+	 * Callers pass MaxReach >= Flat's own distance, so the fade toward Flat stays in reach too.
 	 */
 	bool WarpPointWithinReach(const FVector& Flat, const FVector& Root, double MaxReach, FVector& OutWarped, FQuat& OutRotation,
-		bool* OutReachLimited = nullptr) const;
+		bool* OutReachLimited = nullptr, double* OutSurfaceWeight = nullptr) const;
 
 	/**
 	 * REACH SEARCHES. A spot = WarpPointAt(UV, Height): the surface at (s, t), then Height out along ITS normal. It qualifies
-	 * when the map has surface there and it's within MaxReach of Root. Both return the qualifying (s, t) nearest StartUV
+	 * when it's ON the surface (IsOnSurface) and within MaxReach of Root. Both return the qualifying (s, t) nearest StartUV
 	 * (StartUV itself if it qualifies), searched out to MaxDistance along the surface; false if none.
 	 *  - FindNearestInReach: any direction (a ring of 16 starting toward the root, then the best one refined).
 	 *  - FindAlongLineInReach: only along the line through StartUV in Direction, either way (the shorter one wins).
@@ -245,6 +281,16 @@ private:
 	/** March from (Column, Row) in (DC, DR) to the grid's edge: steps over one empty cell, stops at the second. */
 	void MarchLine(int32 Column, int32 Row, int32 DC, int32 DR, const FClimbSurfaceMapBuildSettings& Settings,
 		FClimbSurfaceMapTraceFn Trace);
+
+	/**
+	 * A cell counts as surface for coverage: valid, or a ONE-cell hole - empty with valid cells on both sides along its row or
+	 * its column (the march steps over exactly these) - so a hand crossing a small gap isn't faded.
+	 */
+	bool IsCellSupported(int32 Column, int32 Row) const;
+
+	/** The snap + fade + (optional) reach rule behind WarpPoint / WarpPointWithinReach. Root null = no reach rule. */
+	bool WarpSnapped(const FVector& Flat, const FVector* Root, double MaxReach, FVector& OutWarped, FQuat& OutRotation,
+		bool* OutReachLimited, double* OutSurfaceWeight) const;
 
 	/** Cell spacing in (s, t) (cm). */
 	FVector2D Spacing() const;

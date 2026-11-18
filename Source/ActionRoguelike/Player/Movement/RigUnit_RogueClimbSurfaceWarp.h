@@ -44,15 +44,19 @@ struct FRogueClimbSurfaceWarpWorkData
  *  - The effector (hand / foot bone): its (u, v) on the flat wall becomes the same distances ALONG the surface (the map is
  *    marched, so 60 cm right of the body lands 60 cm round a cylinder), and its height above the plane is kept, measured
  *    from the surface there along the local normal; its rotation turns from the plane normal to the local normal.
+ *  - Past the wall's edge: the effector snaps onto the nearest surface within the map's SnapRadius, and the warp fades back
+ *    to the clip's pose as that surface gets farther (full up to half the radius, none at it). Over a void - a dangling
+ *    foot under a lip - nothing is changed (SurfaceWeight 0).
  *  - Reach rule: a warped contact (palm / ball) past the component's leash limit (the Reach pin, from FClimbLimbPin::Reach)
- *    or over a hole moves to the nearest spot on the map that has surface and is in reach - a wide reach on a convex wall
- *    lands at the edge of reach, still on the surface. Distance the clip itself put there is never undone.
+ *    moves to the nearest on-surface spot in reach - a wide reach on a convex wall lands at the edge of reach, still on the
+ *    surface. Distance the clip itself put there is never undone.
  *  - The limb's root stays put; the knee / elbow is rebuilt with the skeleton's bone lengths (read from the reference pose,
  *    as Basic IK does with its lengths at 0) in the clip's own bend plane (the learned FK hinge), never folding tighter than
  *    MinMidAngle. Bone lengths never change.
  *
- * Feed SurfaceMap and Weight from the mover component (ClimbSurfaceMap, ClimbSurfaceWarpWeight). The map is WORLD space; the
- * node converts it with the rig's current component transform. Operates in global (rig) space, like Basic IK.
+ * Feed SurfaceMap from the mover component (ClimbSurfaceMap) and Weight from this limb's pin (FClimbLimbPin::WarpWeight - the
+ * climb's warp weight, faded out while a foot hangs). The map is WORLD space; the node converts it with the rig's current
+ * component transform. Operates in global (rig) space, like Basic IK.
  */
 USTRUCT(meta = (DisplayName = "Climb Surface Warp", Category = "Hierarchy", Keywords = "Climb,Warp,Surface,Conform,Curved", NodeColor = "0 1 1"))
 struct FRigUnit_RogueClimbSurfaceWarp : public FRigUnit_HighlevelBaseMutable
@@ -78,7 +82,7 @@ struct FRigUnit_RogueClimbSurfaceWarp : public FRigUnit_HighlevelBaseMutable
 	UPROPERTY(meta = (Input))
 	FClimbSurfaceMap SurfaceMap;
 
-	/** How much to warp: the mover component's ClimbSurfaceWarpWeight (1 while climbing, eased; 0 off the wall). */
+	/** How much to warp: this limb's FClimbLimbPin::WarpWeight (1 while climbing, eased; 0 off the wall or while the foot hangs). */
 	UPROPERTY(meta = (Input))
 	float Weight = 1.0f;
 
@@ -124,6 +128,10 @@ struct FRigUnit_RogueClimbSurfaceWarp : public FRigUnit_HighlevelBaseMutable
 	/** The reach rule pulled the effector back toward the root (or it was left short at full reach). */
 	UPROPERTY(meta = (Output))
 	bool bReachLimited = false;
+
+	/** How much of the warp the effector got from the surface around it: 1 on the wall, fading to 0 past its edge (0 = over a void, untouched). */
+	UPROPERTY(meta = (Output))
+	float SurfaceWeight = 0.0f;
 
 	UPROPERTY()
 	FCachedRigElement CachedItemA;

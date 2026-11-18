@@ -17,6 +17,7 @@ void FClimbSurfaceMap::Reset(const FVector& InOrigin, const FVector& InNormal, c
 	Max = InMax;
 	Cells.Reset(Columns * Rows);
 	Cells.AddDefaulted(Columns * Rows);
+	StartCell = INDEX_NONE;
 	bValid = !Up.IsNearlyZero() && !Right.IsNearlyZero() && Max.X - Min.X > UE_KINDA_SMALL_NUMBER && Max.Y - Min.Y > UE_KINDA_SMALL_NUMBER;
 }
 
@@ -52,31 +53,16 @@ void FClimbSurfaceMap::Build(const FVector& InOrigin, const FVector& InNormal, c
 	const FClimbSurfaceMapBuildSettings& Settings, FClimbSurfaceMapTraceFn Trace)
 {
 	Reset(InOrigin, InNormal, InUp, Settings.Columns, Settings.Rows, Settings.Min, Settings.Max);
+	SnapRadius = static_cast<float>(FMath::Max(Settings.SnapRadius, 0.0));
 	if (!bValid)
 	{
 		return;
 	}
 	const FVector2D Step = Spacing();
 
-	// --- The start cell: the one nearest the body (plane (0, 0)) that hits a wall facing the climber, traced straight into
-	// the wall. Cells BELOW the body count as farther: in a dead hang the wall that matters is up at the hands.
-	const int32 BodyColumn = FMath::Clamp(FMath::RoundToInt32(-Min.X / Step.X), 0, Columns - 1);
-	const int32 BodyRow = FMath::Clamp(FMath::RoundToInt32(-Min.Y / Step.Y), 0, Rows - 1);
-	TArray<TPair<double, int32>, TInlineAllocator<128>> Candidates;
-	Candidates.Reserve(Cells.Num());
-	for (int32 Index = 0; Index < Cells.Num(); ++Index)
+	// A start trace: straight into the wall at a cell's plane spot; it counts when it hits a wall facing the climber.
+	auto TryStart = [&](int32 Index)
 	{
-		const double DU = (Index % Columns - BodyColumn) * Step.X;
-		const double DV = (Index / Columns - BodyRow) * Step.Y * ((Index / Columns < BodyRow) ? 1.5 : 1.0);
-		Candidates.Emplace(DU * DU + DV * DV, Index);
-	}
-	Candidates.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
-
-	int32 StartIndex = INDEX_NONE;
-	const int32 NumAttempts = FMath::Min(FMath::Max(Settings.MaxStartAttempts, 1), Candidates.Num());
-	for (int32 Attempt = 0; Attempt < NumAttempts && StartIndex == INDEX_NONE; ++Attempt)
-	{
-		const int32 Index = Candidates[Attempt].Value;
 		const FVector OnPlane = PlanePoint(CellUV(Index % Columns, Index / Columns));
 		FClimbSurfaceMapHit Hit;
 		if (Trace(OnPlane + Normal * Settings.FrontReach, OnPlane - Normal * Settings.BackReach, Hit) && Hit.bClimbable
@@ -86,13 +72,68 @@ void FClimbSurfaceMap::Build(const FVector& InOrigin, const FVector& InNormal, c
 			Start.bValid = true;
 			Start.Point = Hit.Point;
 			Start.Normal = Hit.Normal.GetSafeNormal();
-			StartIndex = Index;
+			return true;
+		}
+		return false;
+	};
+	int32 StartIndex = INDEX_NONE;
+
+	// --- 1) ANCHORED START: shift the grid (by at most half a cell) so a cell sits exactly on the hint - a point the climb
+	// already found to be wall this tick. Its trace runs through that very point, so the start finds the wall wherever the
+	// climb found it: up at the hands in a full hang (nothing near the body), on a lip face thinner than a row.
+	int32 AnchorIndex = INDEX_NONE;
+	if (Settings.bHasStartHint)
+	{
+		const FVector2D HintUV = ToUV(Settings.StartHint);
+		const int32 HintColumn = FMath::RoundToInt32((HintUV.X - Min.X) / Step.X);
+		const int32 HintRow = FMath::RoundToInt32((HintUV.Y - Min.Y) / Step.Y);
+		if (HintColumn >= 0 && HintColumn < Columns && HintRow >= 0 && HintRow < Rows)
+		{
+			const FVector2D Shift = HintUV - (Min + FVector2D(Step.X * HintColumn, Step.Y * HintRow));
+			Min += Shift;
+			Max += Shift;
+			AnchorIndex = HintRow * Columns + HintColumn;
+			if (TryStart(AnchorIndex))
+			{
+				StartIndex = AnchorIndex;
+			}
+		}
+	}
+
+	// --- 2) FALLBACK: the cell nearest the body (plane (0, 0)) that hits. Cells BELOW the body count as farther: in a dead
+	// hang the wall that matters is up at the hands.
+	if (StartIndex == INDEX_NONE)
+	{
+		const int32 BodyColumn = FMath::Clamp(FMath::RoundToInt32(-Min.X / Step.X), 0, Columns - 1);
+		const int32 BodyRow = FMath::Clamp(FMath::RoundToInt32(-Min.Y / Step.Y), 0, Rows - 1);
+		TArray<TPair<double, int32>, TInlineAllocator<128>> Candidates;
+		Candidates.Reserve(Cells.Num());
+		for (int32 Index = 0; Index < Cells.Num(); ++Index)
+		{
+			if (Index == AnchorIndex)
+			{
+				continue; // already tried
+			}
+			const double DU = (Index % Columns - BodyColumn) * Step.X;
+			const double DV = (Index / Columns - BodyRow) * Step.Y * ((Index / Columns < BodyRow) ? 1.5 : 1.0);
+			Candidates.Emplace(DU * DU + DV * DV, Index);
+		}
+		Candidates.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
+
+		const int32 NumAttempts = FMath::Min(FMath::Max(Settings.MaxStartAttempts, 1), Candidates.Num());
+		for (int32 Attempt = 0; Attempt < NumAttempts && StartIndex == INDEX_NONE; ++Attempt)
+		{
+			if (TryStart(Candidates[Attempt].Value))
+			{
+				StartIndex = Candidates[Attempt].Value;
+			}
 		}
 	}
 	if (StartIndex == INDEX_NONE)
 	{
-		return; // no wall near the body: a map with no valid cell
+		return; // no wall to start from: a map with no valid cell (StartCell stays INDEX_NONE)
 	}
+	StartCell = StartIndex;
 	const int32 StartColumn = StartIndex % Columns;
 	const int32 StartRow = StartIndex / Columns;
 
@@ -300,7 +341,7 @@ bool FClimbSurfaceMap::Sample(const FVector2D& UV, FVector& OutPoint, FVector& O
 	FVector CornerNormal[4];
 	bool CornerValid[4];
 	int32 NumValid = 0;
-	double ValidWeight = 0.0;
+	double SupportWeight = 0.0;  // coverage: the bilinear weight of corners that count as surface (valid or a one-cell hole)
 	FVector ValidNormalSum = FVector::ZeroVector;
 	for (int32 Corner = 0; Corner < 4; ++Corner)
 	{
@@ -310,9 +351,12 @@ bool FClimbSurfaceMap::Sample(const FVector2D& UV, FVector& OutPoint, FVector& O
 		{
 			CornerPoint[Corner] = C.Point;
 			CornerNormal[Corner] = C.Normal;
-			ValidWeight += CornerW[Corner];
 			ValidNormalSum += C.Normal;
 			++NumValid;
+		}
+		if (C.bValid || IsCellSupported(CornerX[Corner], CornerY[Corner]))
+		{
+			SupportWeight += CornerW[Corner];
 		}
 	}
 	if (NumValid == 0)
@@ -371,9 +415,51 @@ bool FClimbSurfaceMap::Sample(const FVector2D& UV, FVector& OutPoint, FVector& O
 	OutPoint = Point;
 	if (OutCoverage)
 	{
-		*OutCoverage = FMath::Clamp(ValidWeight, 0.0, 1.0);
+		*OutCoverage = FMath::Clamp(SupportWeight, 0.0, 1.0);
 	}
 	return true;
+}
+
+bool FClimbSurfaceMap::IsCellSupported(int32 Column, int32 Row) const
+{
+	if (Column < 0 || Column >= Columns || Row < 0 || Row >= Rows)
+	{
+		return false;
+	}
+	if (Cell(Column, Row).bValid)
+	{
+		return true;
+	}
+	auto IsValid = [this](int32 C, int32 R) { return C >= 0 && C < Columns && R >= 0 && R < Rows && Cell(C, R).bValid; };
+	return (IsValid(Column - 1, Row) && IsValid(Column + 1, Row)) || (IsValid(Column, Row - 1) && IsValid(Column, Row + 1));
+}
+
+namespace
+{
+	// ON the surface = at least half the bilinear weight around the point is surface: the edge sits halfway between the last
+	// valid cell and the first empty one.
+	constexpr double OnSurfaceCoverage = 0.5;
+}
+
+bool FClimbSurfaceMap::IsOnSurface(const FVector2D& UV) const
+{
+	FVector Point;
+	FVector SurfaceNormal;
+	double Coverage = 0.0;
+	return Sample(UV, Point, SurfaceNormal, &Coverage) && Coverage >= OnSurfaceCoverage;
+}
+
+double FClimbSurfaceMap::SnapWeight(double Distance) const
+{
+	if (Distance <= 0.0)
+	{
+		return 1.0;
+	}
+	if (SnapRadius <= UE_KINDA_SMALL_NUMBER)
+	{
+		return 0.0;
+	}
+	return 1.0 - FMath::SmoothStep(0.5 * SnapRadius, static_cast<double>(SnapRadius), Distance);
 }
 
 bool FClimbSurfaceMap::Locate(const FVector& World, FVector2D& OutUV) const
@@ -430,11 +516,11 @@ bool FClimbSurfaceMap::Locate(const FVector& World, FVector2D& OutUV) const
 	return true;
 }
 
-bool FClimbSurfaceMap::WarpPointAt(const FVector2D& UV, double Height, FVector& OutWarped, FQuat& OutRotation) const
+bool FClimbSurfaceMap::WarpPointAt(const FVector2D& UV, double Height, FVector& OutWarped, FQuat& OutRotation, double* OutCoverage) const
 {
 	FVector SurfacePoint;
 	FVector SurfaceNormal;
-	if (!Sample(UV, SurfacePoint, SurfaceNormal))
+	if (!Sample(UV, SurfacePoint, SurfaceNormal, OutCoverage))
 	{
 		return false;
 	}
@@ -442,11 +528,6 @@ bool FClimbSurfaceMap::WarpPointAt(const FVector2D& UV, double Height, FVector& 
 	OutWarped = SurfacePoint + SurfaceNormal * Height;
 	OutRotation = FQuat::FindBetweenNormals(Normal, SurfaceNormal);
 	return true;
-}
-
-bool FClimbSurfaceMap::WarpPoint(const FVector& Flat, FVector& OutWarped, FQuat& OutRotation) const
-{
-	return WarpPointAt(ToUV(Flat), HeightAbovePlane(Flat), OutWarped, OutRotation);
 }
 
 namespace
@@ -487,31 +568,152 @@ namespace
 		}
 		return Good;
 	}
+
+	// The qualifying spot nearest Start in any direction, out to MaxDistance: a ring of directions (starting at StartAngle,
+	// which wins ties), each searched only as far as the best so far; then the best direction's angle is refined so the result
+	// moves smoothly as Start moves. Start itself is assumed NOT to qualify. Returns the distance, or -1 when nothing does.
+	template <typename FQualifies>
+	double NearestQualifying(const FVector2D& Start, double StartAngle, double MaxDistance, const FQualifies& Qualifies,
+		FVector2D& OutUV)
+	{
+		constexpr int32 NumDirections = 16;
+		constexpr int32 MarchSteps = 8;
+		constexpr int32 RefineSteps = 6;
+		constexpr int32 AngleRefineSteps = 3;
+		auto DistanceAlong = [&](double Angle, double Limit)
+		{
+			return DistanceToFirstQualifying(Start, FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)), Limit, MarchSteps, RefineSteps, Qualifies);
+		};
+		double BestDistance = -1.0;
+		double BestAngle = StartAngle;
+		for (int32 Index = 0; Index < NumDirections; ++Index)
+		{
+			const double Angle = StartAngle + UE_TWO_PI * Index / NumDirections;
+			const double Distance = DistanceAlong(Angle, BestDistance > 0.0 ? BestDistance : MaxDistance);
+			if (Distance >= 0.0 && (BestDistance < 0.0 || Distance < BestDistance))
+			{
+				BestDistance = Distance;
+				BestAngle = Angle;
+			}
+		}
+		if (BestDistance < 0.0)
+		{
+			return -1.0;
+		}
+		double AngleStep = UE_PI / NumDirections;
+		for (int32 Step = 0; Step < AngleRefineSteps; ++Step, AngleStep *= 0.5)
+		{
+			for (const double Sign : { -1.0, 1.0 })
+			{
+				const double Angle = BestAngle + Sign * AngleStep;
+				const double Distance = DistanceAlong(Angle, BestDistance);
+				if (Distance >= 0.0 && Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					BestAngle = Angle;
+				}
+			}
+		}
+		OutUV = Start + FVector2D(FMath::Cos(BestAngle), FMath::Sin(BestAngle)) * BestDistance;
+		return BestDistance;
+	}
 }
 
-bool FClimbSurfaceMap::WarpPointWithinReach(const FVector& Flat, const FVector& Root, double MaxReach, FVector& OutWarped,
-	FQuat& OutRotation, bool* OutReachLimited) const
+bool FClimbSurfaceMap::FindSurface(const FVector2D& UV, FVector2D& OutUV, double& OutDistance) const
+{
+	if (IsOnSurface(UV))
+	{
+		OutUV = UV;
+		OutDistance = 0.0;
+		return true;
+	}
+	if (SnapRadius <= UE_KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+	// Past the wall's edge (or over a hole): the nearest surface within the snap radius. The ring starts toward the body
+	// ((0, 0)), where the wall usually is from a dangling foot.
+	const double StartAngle = UV.IsNearlyZero() ? 0.0 : FMath::Atan2(-UV.Y, -UV.X);
+	const double Distance = NearestQualifying(UV, StartAngle, SnapRadius, [this](const FVector2D& Candidate) { return IsOnSurface(Candidate); }, OutUV);
+	if (Distance < 0.0)
+	{
+		return false;
+	}
+	OutDistance = Distance;
+	return true;
+}
+
+bool FClimbSurfaceMap::WarpSnapped(const FVector& Flat, const FVector* Root, double MaxReach, FVector& OutWarped, FQuat& OutRotation,
+	bool* OutReachLimited, double* OutSurfaceWeight) const
 {
 	if (OutReachLimited)
 	{
 		*OutReachLimited = false;
 	}
+	if (OutSurfaceWeight)
+	{
+		*OutSurfaceWeight = 0.0;
+	}
 	const FVector2D TargetUV = ToUV(Flat);
 	const double Height = HeightAbovePlane(Flat);
 
-	// THE NEAREST qualifying spot to the target in (s, t) - not "straight toward the root", which also pulls a hold above
-	// the shoulder DOWN even when the extra distance came from a sideways curve.
-	FVector2D UV;
-	if (!FindNearestInReach(TargetUV, Height, Root, MaxReach, FMath::Max(MaxReach, 1.0), UV))
+	// 1) SNAP: the surface for this point - under it, or the nearest within SnapRadius. None = over a void: no warp.
+	FVector2D SurfaceUV;
+	double SnapDistance = 0.0;
+	if (!FindSurface(TargetUV, SurfaceUV, SnapDistance))
 	{
-		// Nothing reachable nearby: the plain warp (the limb straightens toward it), if there's surface there at all.
-		return WarpPointAt(TargetUV, Height, OutWarped, OutRotation);
+		return false;
 	}
-	if (OutReachLimited)
+	const double Weight = SnapWeight(SnapDistance);
+	if (Weight <= UE_KINDA_SMALL_NUMBER)
 	{
-		*OutReachLimited = UV != TargetUV;
+		return false;
 	}
-	return WarpPointAt(UV, Height, OutWarped, OutRotation);
+
+	// 2) REACH (optional): the nearest on-surface spot in reach of the root - not "straight toward the root", which also
+	// pulls a hold above the shoulder DOWN even when the extra distance came from a sideways curve. Searched from the snapped
+	// spot, only across surface: it undoes distance the warp added, it never hunts for surface.
+	FVector2D UV = SurfaceUV;
+	if (Root)
+	{
+		FVector2D InReachUV;
+		if (FindNearestInReach(SurfaceUV, Height, *Root, MaxReach, FMath::Max(MaxReach, 1.0), InReachUV))
+		{
+			UV = InReachUV;
+		}
+		if (OutReachLimited)
+		{
+			*OutReachLimited = UV != SurfaceUV;
+		}
+	}
+
+	FVector Warped;
+	FQuat Rotation;
+	if (!WarpPointAt(UV, Height, Warped, Rotation))
+	{
+		return false;
+	}
+
+	// 3) FADE: blend back toward the flat pose as the surface gets farther (full up to half the snap radius, none at it). The
+	// flat point is in reach (callers' MaxReach covers it) and so is the warped one, so the blend is too.
+	OutWarped = FMath::Lerp(Flat, Warped, Weight);
+	OutRotation = FQuat::Slerp(FQuat::Identity, Rotation, Weight).GetNormalized();
+	if (OutSurfaceWeight)
+	{
+		*OutSurfaceWeight = Weight;
+	}
+	return true;
+}
+
+bool FClimbSurfaceMap::WarpPoint(const FVector& Flat, FVector& OutWarped, FQuat& OutRotation, double* OutSurfaceWeight) const
+{
+	return WarpSnapped(Flat, nullptr, 0.0, OutWarped, OutRotation, nullptr, OutSurfaceWeight);
+}
+
+bool FClimbSurfaceMap::WarpPointWithinReach(const FVector& Flat, const FVector& Root, double MaxReach, FVector& OutWarped,
+	FQuat& OutRotation, bool* OutReachLimited, double* OutSurfaceWeight) const
+{
+	return WarpSnapped(Flat, &Root, MaxReach, OutWarped, OutRotation, OutReachLimited, OutSurfaceWeight);
 }
 
 bool FClimbSurfaceMap::FindNearestInReach(const FVector2D& StartUV, double Height, const FVector& Root, double MaxReach,
@@ -521,7 +723,9 @@ bool FClimbSurfaceMap::FindNearestInReach(const FVector2D& StartUV, double Heigh
 	{
 		FVector Point;
 		FQuat Rotation;
-		return WarpPointAt(UV, Height, Point, Rotation) && FVector::DistSquared(Point, Root) <= FMath::Square(MaxReach);
+		double Coverage = 0.0;
+		return WarpPointAt(UV, Height, Point, Rotation, &Coverage) && Coverage >= OnSurfaceCoverage
+			&& FVector::DistSquared(Point, Root) <= FMath::Square(MaxReach);
 	};
 	if (Qualifies(StartUV))
 	{
@@ -532,51 +736,10 @@ bool FClimbSurfaceMap::FindNearestInReach(const FVector2D& StartUV, double Heigh
 	{
 		return false;
 	}
-
-	// A ring of directions (starting toward the root, which wins ties), each searched only as far as the best so far; then
-	// refine the best direction's angle so the result moves smoothly as the start moves.
-	constexpr int32 NumDirections = 16;
-	constexpr int32 MarchSteps = 8;
-	constexpr int32 RefineSteps = 6;
-	constexpr int32 AngleRefineSteps = 3;
+	// The ring starts toward the root, which wins ties.
 	const FVector2D ToRoot = ToUV(Root) - StartUV;
 	const double StartAngle = ToRoot.IsNearlyZero() ? 0.0 : FMath::Atan2(ToRoot.Y, ToRoot.X);
-	auto DistanceAlong = [&](double Angle, double Limit)
-	{
-		return DistanceToFirstQualifying(StartUV, FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)), Limit, MarchSteps, RefineSteps, Qualifies);
-	};
-	double BestDistance = -1.0;
-	double BestAngle = StartAngle;
-	for (int32 Index = 0; Index < NumDirections; ++Index)
-	{
-		const double Angle = StartAngle + UE_TWO_PI * Index / NumDirections;
-		const double Distance = DistanceAlong(Angle, BestDistance > 0.0 ? BestDistance : MaxDistance);
-		if (Distance >= 0.0 && (BestDistance < 0.0 || Distance < BestDistance))
-		{
-			BestDistance = Distance;
-			BestAngle = Angle;
-		}
-	}
-	if (BestDistance < 0.0)
-	{
-		return false;
-	}
-	double AngleStep = UE_PI / NumDirections;
-	for (int32 Step = 0; Step < AngleRefineSteps; ++Step, AngleStep *= 0.5)
-	{
-		for (const double Sign : { -1.0, 1.0 })
-		{
-			const double Angle = BestAngle + Sign * AngleStep;
-			const double Distance = DistanceAlong(Angle, BestDistance);
-			if (Distance >= 0.0 && Distance < BestDistance)
-			{
-				BestDistance = Distance;
-				BestAngle = Angle;
-			}
-		}
-	}
-	OutUV = StartUV + FVector2D(FMath::Cos(BestAngle), FMath::Sin(BestAngle)) * BestDistance;
-	return true;
+	return NearestQualifying(StartUV, StartAngle, MaxDistance, Qualifies, OutUV) >= 0.0;
 }
 
 bool FClimbSurfaceMap::FindAlongLineInReach(const FVector2D& StartUV, const FVector2D& Direction, double Height,
@@ -586,7 +749,9 @@ bool FClimbSurfaceMap::FindAlongLineInReach(const FVector2D& StartUV, const FVec
 	{
 		FVector Point;
 		FQuat Rotation;
-		return WarpPointAt(UV, Height, Point, Rotation) && FVector::DistSquared(Point, Root) <= FMath::Square(MaxReach);
+		double Coverage = 0.0;
+		return WarpPointAt(UV, Height, Point, Rotation, &Coverage) && Coverage >= OnSurfaceCoverage
+			&& FVector::DistSquared(Point, Root) <= FMath::Square(MaxReach);
 	};
 	if (Qualifies(StartUV))
 	{
@@ -633,6 +798,7 @@ FClimbSurfaceMap FClimbSurfaceMap::Transformed(const FTransform& Transform) cons
 	Out.Normal = Transform.TransformVectorNoScale(Normal);
 	Out.Min = Min * Scale;
 	Out.Max = Max * Scale;
+	Out.SnapRadius = static_cast<float>(SnapRadius * Scale);
 	for (FClimbSurfaceMapCell& Cell : Out.Cells)
 	{
 		Cell.Point = Transform.TransformPosition(Cell.Point);
